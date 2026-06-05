@@ -44,14 +44,17 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V011";
+const APP_VERSION = "V014";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
-const GAS_URL = "";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbx5PYLCxncWe33YZZJ8I9Xar8AHNncQxMZdoxolR0JR28DU7chKZHGWxXfmsYCjv5jF/exec";
 
 // ▼ 생산관리시스템(FE) 백업 엔드포인트. fe-backup-*.json 의 설정(라인/품명/품번)을 자동으로 불러옵니다.
 const PROD_GAS_URL = "https://script.google.com/macros/s/AKfycbxLFrxbAaBt1bBa3SUdDY9wY48tvt85mEDaj3tiKhyw_R7oJCC9GbOWLfWbdSohnQtB/exec";
+
+// ▼ 이 앱이 배포된 주소 (결재 알림 메일의 "결재하러 가기" 링크에 사용). 실제 호스팅 주소로 맞추세요.
+const APP_URL = "https://eatonmfgkorea-maker.github.io/check/";
 
 const LS_RECORDS  = "mfg_cl_records_v1";
 const LS_SETTINGS = "mfg_cl_settings_v1";
@@ -225,6 +228,7 @@ function defaultSettings(){
     reviewers: [],
     managers: [],
     passwords: {},   // { 이름: 해시 } — 결재 비밀번호
+    emails: {},      // { 이름: 이메일 } — 결재 알림 메일
     adminPw: hashPw("1550612a"),   // 설정(관리자) 진입 비밀번호
     places: ["FE","TCP"],
     deliveryCats: [...DEFAULT_DELIVERY_CATS],
@@ -476,6 +480,17 @@ function App(){
     rd.readAsText(file);
   }, []);
 
+  // 결재 요청 메일 발송 (여러 건을 한 통으로). 등록 이메일/GAS 없으면 건너뜀.
+  const sendApprovalMail = useCallback((to, toName, recs)=>{
+    if(!GAS_URL || !to || !recs || !recs.length) return;
+    const mail = buildApprovalListMail(recs, toName);
+    fetch(GAS_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body: JSON.stringify({ action:"mail", to, subject:mail.subject, html:mail.html, text:mail.text }) }).catch(()=>{});
+  }, []);
+
+  // 메일 링크(#inbox)로 들어오면 결재함 탭 자동 열기
+  useEffect(()=>{ if((location.hash||"").toLowerCase().indexOf("inbox")>=0) setTab("inbox"); }, []);
+
   // 초기 Drive 동기화 (Drive 우선)
   useEffect(()=>{
     (async()=>{
@@ -520,6 +535,19 @@ function App(){
 
   function approveMany(targets, opts){
     opts = opts||{};
+    // 메일: 검토(s2) 승인 → 부서장(s3)에게. 같은 수신자끼리 묶어 1통. (완료 메일은 보내지 않음)
+    const byName = new Map();   // s3이름 -> {to, recs:[]}
+    targets.forEach(t=>{
+      if(t.step!=="s2") return;
+      const r = records.find(x=>x.id===t.id); if(!r) return;
+      const nm = r.approval.s3 && r.approval.s3.name;
+      if(!nm) return;
+      const to = (settings.emails||{})[nm];
+      if(!to) return;
+      if(!byName.has(nm)) byName.set(nm, {to, recs:[]});
+      byName.get(nm).recs.push(r);
+    });
+    byName.forEach((v,nm)=> sendApprovalMail(v.to, nm, v.recs));
     setRecords(prev=>prev.map(r=>{
       const t = targets.find(x=>x.id===r.id);
       if(!t) return r;
@@ -564,7 +592,7 @@ function App(){
     return <Editor rec={editing} settings={settings} records={records}
       onCancel={()=>setEditing(null)}
       onSaveDraft={(r)=>{ r.status="draft"; upsert(r); setEditing(null); setTab("list"); }}
-      onSubmit={(r)=>{ r.status="pending"; r.approval.s1={name:r.approval.s1.name||r.shiftLeader||r.writer||"", approved:true, at:nowStr()}; upsert(r); setEditing(null); setTab("inbox"); }}
+      onSubmit={(r)=>{ r.status="pending"; r.approval.s1={name:r.approval.s1.name||r.shiftLeader||r.writer||"", approved:true, at:nowStr()}; upsert(r); { const nm=r.approval.s2.name, to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, [r]); } setEditing(null); setTab("inbox"); }}
     />;
   }
 
@@ -1029,6 +1057,30 @@ function BriefingFields({r, set, setR, settings, onLoadRecent, hasRecent, recent
    ============================================================ */
 function recTitle(r){ return r.type==="briefing" ? `조회일지 · ${fmtDate(r.date)} · ${r.place}` : `${TPL[r.type].title} · ${r.name||"-"}`; }
 
+// 결재 요청 메일 (여러 건을 한 통으로). recs: 같은 결재자에게 갈 문서 배열
+function buildApprovalListMail(recs, toName){
+  const url = APP_URL + (APP_URL.indexOf("#")>=0 ? "" : "#inbox");
+  const n = recs.length;
+  const dOf = (r)=> r.type==="briefing" ? fmtDate(r.date) : (r.prodDate?fmtDate(r.prodDate):fmtDate(r.createdAt));
+  const subject = n===1
+    ? `[결재요청] ${TYPE_META[recs[0].type].label} · ${recs[0].type==="briefing"?dOf(recs[0]):(recs[0].name||"")}`
+    : `[결재요청] ${toName?toName+"님 ":""}결재 ${n}건`;
+  const lead = `${toName?toName+"님, ":""}결재 요청이 ${n}건 도착했습니다.`;
+  const items = recs.map(r=>{
+    const meta=TYPE_META[r.type];
+    const desc = r.type==="briefing" ? `${dOf(r)} · ${r.place||""}` : `${r.name||"-"}${r.line?` · ${r.line}`:""}${r.lot?` · Lot ${r.lot}`:""}`;
+    return `<tr><td style="padding:5px 10px;font-size:13px;color:#0f172a;border-bottom:1px solid #eef2f7"><b style="color:${meta.accent}">[${meta.short}]</b> ${desc}</td></tr>`;
+  }).join("");
+  const html = `<div style="font-family:'Apple SD Gothic Neo',sans-serif;max-width:480px">
+    <p style="font-size:15px;color:#111827">${lead}</p>
+    <table style="border-collapse:collapse;background:#f8fafc;border-radius:8px;width:100%">${items}</table>
+    <a href="${url}" style="display:inline-block;margin-top:14px;background:#0f172a;color:#ffffff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px">결재하러 가기 →</a>
+    <p style="margin-top:16px;color:#94a3b8;font-size:12px">현장 점검표 · 조회일지 시스템</p>
+  </div>`;
+  const text = `${lead}\n` + recs.map(r=> r.type==="briefing" ? `- [조회일지] ${dOf(r)} ${r.place||""}` : `- ${r.name||"-"} ${r.lot||""}`).join("\n") + `\n결재하러 가기: ${url}`;
+  return { subject, html, text };
+}
+
 function InboxView({records, onApprove, onOpen, passwords, onSetPassword}){
   const [mode, setMode] = useState("all");   // all | person
   const [person, setPerson] = useState("");  // 선택된 결재자
@@ -1367,8 +1419,32 @@ function PeopleSettings({settings, setSettings}){
       <ListEditor title="작성자 / 담당" hint="조회일지 작성자, 점검표 Shift Leader, 결재 1단계(담당)에 사용됩니다." items={settings.writers} onChange={v=>setSettings(p=>({...p,writers:v}))}/>
       <ListEditor title="검토자" hint="결재 2단계(검토)에 사용됩니다." items={settings.reviewers} onChange={v=>setSettings(p=>({...p,reviewers:v}))}/>
       <ListEditor title="부서장 / 승인" hint="결재 마지막 단계(승인)에 사용됩니다." items={settings.managers} onChange={v=>setSettings(p=>({...p,managers:v}))}/>
+      <EmailSettings settings={settings} setSettings={setSettings}/>
       <PasswordSettings settings={settings} setSettings={setSettings}/>
       <AdminPwSettings settings={settings} setSettings={setSettings}/>
+    </div>
+  );
+}
+
+function EmailSettings({settings, setSettings}){
+  const emails = settings.emails||{};
+  const people = useMemo(()=> uniq([...(settings.reviewers||[]), ...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.reviewers, settings.managers, settings.writers]);
+  const setEmail=(name,val)=> setSettings(p=>({...p, emails:{...(p.emails||{}), [name]: val}}));
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="font-bold text-slate-700">결재자 이메일 (알림 메일)</div>
+      <p className="text-[12px] text-slate-400 mt-0.5 mb-3">결재가 올라오면 다음 결재자에게 이 주소로 "결재하러 가기" 메일이 전송됩니다. 메일 발송은 백업용 Apps Script가 연결되어 있어야 동작합니다.</p>
+      {people.length===0 ? <p className="text-[12px] text-slate-300">먼저 작성자/검토자/부서장을 등록하세요.</p> : (
+        <div className="space-y-1.5">
+          {people.map(name=>(
+            <div key={name} className="flex items-center gap-2">
+              <div className="font-semibold text-slate-700 text-[14px] w-28 shrink-0">{name}</div>
+              <input type="email" className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 text-[13px]" placeholder="name@eaton.com"
+                value={emails[name]||""} onChange={e=>setEmail(name, e.target.value)}/>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
