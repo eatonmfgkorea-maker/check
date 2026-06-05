@@ -44,7 +44,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V014";
+const APP_VERSION = "V015";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -1061,23 +1061,50 @@ function recTitle(r){ return r.type==="briefing" ? `조회일지 · ${fmtDate(r.
 function buildApprovalListMail(recs, toName){
   const url = APP_URL + (APP_URL.indexOf("#")>=0 ? "" : "#inbox");
   const n = recs.length;
-  const dOf = (r)=> r.type==="briefing" ? fmtDate(r.date) : (r.prodDate?fmtDate(r.prodDate):fmtDate(r.createdAt));
+  const dOf = (r)=> r.type==="briefing" ? fmtDate(r.date) : fmtDate(r.prodDate||r.checkDate||r.createdAt);
+  const meta0 = TYPE_META[recs[0].type];
+  const line0 = recs[0].type==="briefing" ? (recs[0].place||"") : (recs[0].line||"");
+
   const subject = n===1
-    ? `[결재요청] ${TYPE_META[recs[0].type].label} · ${recs[0].type==="briefing"?dOf(recs[0]):(recs[0].name||"")}`
-    : `[결재요청] ${toName?toName+"님 ":""}결재 ${n}건`;
-  const lead = `${toName?toName+"님, ":""}결재 요청이 ${n}건 도착했습니다.`;
-  const items = recs.map(r=>{
-    const meta=TYPE_META[r.type];
-    const desc = r.type==="briefing" ? `${dOf(r)} · ${r.place||""}` : `${r.name||"-"}${r.line?` · ${r.line}`:""}${r.lot?` · Lot ${r.lot}`:""}`;
-    return `<tr><td style="padding:5px 10px;font-size:13px;color:#0f172a;border-bottom:1px solid #eef2f7"><b style="color:${meta.accent}">[${meta.short}]</b> ${desc}</td></tr>`;
-  }).join("");
-  const html = `<div style="font-family:'Apple SD Gothic Neo',sans-serif;max-width:480px">
-    <p style="font-size:15px;color:#111827">${lead}</p>
-    <table style="border-collapse:collapse;background:#f8fafc;border-radius:8px;width:100%">${items}</table>
-    <a href="${url}" style="display:inline-block;margin-top:14px;background:#0f172a;color:#ffffff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px">결재하러 가기 →</a>
-    <p style="margin-top:16px;color:#94a3b8;font-size:12px">현장 점검표 · 조회일지 시스템</p>
+    ? `[결재요청] ${dOf(recs[0])} / ${meta0.label} / ${line0||"-"}`
+    : `[결재요청] ${dOf(recs[0])} ${meta0.label} 외 ${n-1}건`;
+
+  const tdK = "padding:7px 12px;background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;border:1px solid #e2e8f0;white-space:nowrap;width:84px";
+  const tdV = "padding:7px 12px;color:#111827;font-size:13px;border:1px solid #e2e8f0";
+
+  const rowsOf = (r)=>{
+    const m = TYPE_META[r.type];
+    if(r.type==="briefing") return [["일자",fmtDate(r.date)],["시간",r.time||"-"],["장소",r.place||"-"],["작성자",r.writer||"-"]];
+    if(r.type==="dock") return [["점검표",m.label],["라인",r.line||"-"],["품명",r.name||"-"],["생산품번",r.part||"-"],["Batch No",r.batchNo||"-"],["검사일",r.checkDate?fmtDate(r.checkDate):"-"],["검사수량",r.samplingSize||"-"],["생산수량",r.batchSize||"-"],["Shift Leader",r.shiftLeader||"-"]];
+    return [["점검표",m.label],["라인",r.line||"-"],["품명",r.name||"-"],["생산품번",r.part||"-"],["Lot",r.lot||"-"],["생산일자",r.prodDate?fmtDate(r.prodDate):"-"],["생산기종",r.model||"-"],["Shift Leader",r.shiftLeader||"-"]];
+  };
+
+  const docBlock = (r)=>{
+    const m = TYPE_META[r.type];
+    const body = rowsOf(r).map(([k,v])=>`<tr><td style="${tdK}">${k}</td><td style="${tdV}">${v}</td></tr>`).join("");
+    const L = roleLabels(r.type); const a = r.approval||{};
+    const chain = `${L[0]} ${a.s1&&a.s1.name||"-"} → ${L[1]} ${a.s2&&a.s2.name||"-"} → ${L[2]} ${a.s3&&a.s3.name||"-"}`;
+    return `<div style="margin:0 0 16px">
+      <div style="display:inline-block;font-size:13px;font-weight:800;color:#fff;background:${m.accent};padding:4px 12px;border-radius:6px;margin:0 0 8px">${m.label}${r.name?` · ${r.name}`:""}</div>
+      <table style="border-collapse:collapse;width:100%">${body}</table>
+      <div style="margin-top:6px;font-size:11.5px;color:#64748b">결재선 &nbsp;${chain}</div>
+    </div>`;
+  };
+
+  const lead = `${toName?`<b>${toName}</b>님, `:""}아래 문서의 결재를 요청드립니다. (${n}건)`;
+  const html = `<div style="font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;color:#1f2937;max-width:560px;margin:0 auto;padding:4px">
+    <div style="font-size:19px;font-weight:800;color:#0f172a;margin:0 0 4px">결재 요청</div>
+    <div style="font-size:13px;color:#475569;margin:0 0 18px">${lead}</div>
+    ${recs.map(docBlock).join("")}
+    <a href="${url}" style="display:inline-block;margin-top:6px;background:#0f172a;color:#ffffff;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:800;font-size:14px">결재하러 가기 →</a>
+    <div style="margin-top:20px;padding-top:10px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:11px">현장 점검표 · 조회일지 전자결재 시스템 · 발신 전용 메일</div>
   </div>`;
-  const text = `${lead}\n` + recs.map(r=> r.type==="briefing" ? `- [조회일지] ${dOf(r)} ${r.place||""}` : `- ${r.name||"-"} ${r.lot||""}`).join("\n") + `\n결재하러 가기: ${url}`;
+
+  const text = `${toName?toName+"님, ":""}결재 요청 ${n}건\n\n` + recs.map(r=>
+    r.type==="briefing" ? `· [조회일지] ${fmtDate(r.date)} ${r.place||""} (작성 ${r.writer||"-"})`
+    : `· ${dOf(r)} ${TYPE_META[r.type].label} ${r.line||""} ${r.name||""} Lot ${r.lot||"-"}`
+  ).join("\n") + `\n\n결재하러 가기: ${url}`;
+
   return { subject, html, text };
 }
 
