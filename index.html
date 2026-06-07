@@ -17,6 +17,13 @@
   .serif-sign { font-family: 'Batang','바탕','Times New Roman',serif; }
   input, select, textarea { font-family: inherit; }
   textarea { resize: vertical; }
+  /* iOS 등에서 날짜/시간 입력값이 오른쪽으로 쏠리지 않고 다른 칸처럼 왼쪽 정렬되도록 */
+  input[type="date"], input[type="time"], input[type="datetime-local"] {
+    -webkit-appearance: none; appearance: none; text-align: left;
+  }
+  input[type="date"]::-webkit-date-and-time-value,
+  input[type="time"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
+  input[type="date"]::-webkit-calendar-picker-indicator { margin-left: auto; opacity: .55; }
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background:#c3ccd8; border-radius: 6px; }
 
@@ -44,7 +51,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V015";
+const APP_VERSION = "V017";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -1210,7 +1217,7 @@ function InboxCard({r, onOpen, onApproveClick}){
       <div className="mt-3 flex gap-2">
         <button className="px-3 py-2 rounded-lg border border-slate-300 text-[13px] text-slate-600" onClick={()=>onOpen(r)}>내용 보기</button>
         <button className="flex-1 py-2 rounded-lg text-white text-[14px] font-bold" style={{background:meta.accent}} onClick={onApproveClick}>
-          {stepLabel} 승인{stepName?` · ${stepName}`:""}
+          {step==="s3"?"최종승인":"승인"}{stepName?` · ${stepName}`:""}
         </button>
       </div>
     </div>
@@ -1262,7 +1269,7 @@ function AuthModal({auth, passwords, onSetPassword, onClose, onConfirm}){
         )}
         <div className="mt-5 flex gap-2">
           <button className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-bold" onClick={onClose}>취소</button>
-          <button className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold" onClick={submit}>{has?"승인":"설정 후 승인"}</button>
+          <button className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold" onClick={submit}>{(()=>{ const act=auth.targets.every(t=>t.step==="s3")?"최종승인":"승인"; return has?act:`설정 후 ${act}`; })()}</button>
         </div>
       </div>
     </div>
