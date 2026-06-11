@@ -55,7 +55,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V031";
+const APP_VERSION = "V034";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -599,6 +599,13 @@ function App(){
   // 메일 링크(#inbox)로 들어오면 결재함 탭 자동 열기
   useEffect(()=>{ if((location.hash||"").toLowerCase().indexOf("inbox")>=0) setTab("inbox"); }, []);
 
+  // QR 라인 모드: #line=Auto%20GVV (라인명) 또는 #line=AGV (라인코드) → 생산계획 탭, 해당 라인만
+  const [lineFocus, setLineFocus] = useState(()=>{
+    try{ const m = decodeURIComponent(location.hash||"").match(/line=([^&#]+)/); return m?m[1].trim():""; }catch(e){ return ""; }
+  });
+  useEffect(()=>{ if(lineFocus) setTab("plan"); }, []);
+  const clearLineFocus = ()=>{ setLineFocus(""); try{ history.replaceState(null,"",location.pathname+location.search); }catch(e){} };
+
   // 초기 Drive 동기화 (Drive 우선)
   useEffect(()=>{
     (async()=>{
@@ -752,6 +759,7 @@ function App(){
         {tab==="plan" && <PlanView records={records} settings={settings}
           planData={planData} onUploadPlan={uploadPlanFile}
           reportSync={reportSync} onReloadReport={()=>loadReportPlan(true)}
+          lineFocus={lineFocus} onClearFocus={clearLineFocus}
           onCreate={createFromPlan} onOpen={setViewing} onEdit={setEditing} />}
         {tab==="new" && <NewView settings={settings} onPick={(type)=>{
           let rec = newRecord(type, settings);
@@ -910,10 +918,20 @@ function ListView({records, onOpen, onEdit, onDelete}){
 /* ============================================================
    생산계획 (MFG Report 백업 연동) — 오늘 생산 품목별 점검표 현황/작성
    ============================================================ */
-function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onCreate, onOpen, onEdit}){
+function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, lineFocus, onClearFocus, onCreate, onOpen, onEdit}){
   const [date, setDate] = useState(todayStr());
   const fileRef = useRef(null);
   const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
+
+  // QR 라인 모드: 라인명 또는 라인코드(AGV 등)를 실제 계획의 라인명으로 해석
+  const focusName = useMemo(()=>{
+    if(!lineFocus) return "";
+    const p = normLine(lineFocus);
+    const lines = [...new Set((planData.rows||[]).map(r=>r.line).filter(Boolean))];
+    let f = lines.find(l=>normLine(l)===p);
+    if(!f) f = lines.find(l=> String((planData.lineCodes||{})[normLine(l)]||"").toUpperCase()===String(lineFocus).trim().toUpperCase());
+    return f || lineFocus;
+  }, [lineFocus, planData]);
 
   // 선택 날짜 행 (엑셀 그대로) — 주/야·품번 단위로 합산
   const allRows = useMemo(()=>{
@@ -927,8 +945,10 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       if(!e.name && row.name) e.name=row.name;
       if(!e.line && row.line) e.line=row.line;
     });
-    return [...m.values()];
-  }, [planData, date, hasPlan]);
+    let arr=[...m.values()];
+    if(lineFocus) arr = arr.filter(r=> normLine(r.line)===normLine(focusName));
+    return arr;
+  }, [planData, date, hasPlan, lineFocus, focusName]);
 
   const bySect = useMemo(()=>{
     const sect = {"주간":[], "야간":[]};
@@ -946,6 +966,35 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   // 순서: Start Up → Dock Audit → 초도양산(선택). 미작성 카운트는 필수 항목만.
   const CL_TYPES = [["startup","Start Up",true],["dock","Dock Audit",true],["first","초도양산",false]];
   const missing = useMemo(()=> allRows.reduce((s,row)=> s + CL_TYPES.filter(([t,,req])=>req && !recOf(t,row)).length, 0), [allRows, records, date]);
+
+  // QR 라인 모드 자동 동작: 현재 시간대(06~18시 주간, 그외 야간) 기준
+  const curShift = (new Date().getHours()>=6 && new Date().getHours()<18) ? "주간" : "야간";
+  const autoRef = useRef(false);
+  const [noPlanAsk, setNoPlanAsk] = useState(false);
+  const [lineAsk, setLineAsk] = useState(false);
+  const createManual = (type)=>{
+    setNoPlanAsk(false);
+    onCreate(type, {line: focusName||lineFocus, name:"", pno:"", date, shift: curShift});
+  };
+  useEffect(()=>{
+    if(!lineFocus || autoRef.current) return;
+    const ready = hasPlan || (reportSync && (reportSync.state==="ok" || reportSync.state==="err"));
+    if(!ready) return;
+    autoRef.current = true;
+    if(allRows.length===0){
+      // 오늘 이 라인 계획 없음 → Start Up / Dock Audit 선택 팝업
+      setNoPlanAsk(true);
+      return;
+    }
+    // 계획 있음 → Start Up / Dock Audit 선택 패널 (상태 표시 포함)
+    setLineAsk(true);
+  }, [lineFocus, hasPlan, reportSync, allRows]);
+
+  // 선택 패널에 보여줄 품목: 현재 시간대 우선, 없으면 오늘 전체
+  const askRows = useMemo(()=>{
+    const s = allRows.filter(r=>r.shift===curShift);
+    return s.length ? s : allRows;
+  }, [allRows, curShift]);
 
   const StatusBtn = ({type, row, optional})=>{
     const rec = recOf(type, row);
@@ -1041,14 +1090,83 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
         </span>
       </div>
 
-      <div className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 flex items-center gap-3">
+      {lineAsk && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={()=>setLineAsk(false)}>
+          <div className="bg-white rounded-2xl p-5 w-full max-w-md shadow-xl max-h-[85vh] overflow-auto" onClick={e=>e.stopPropagation()}>
+            <div className="text-[16px] font-extrabold text-slate-800">📍 {focusName||lineFocus}</div>
+            <div className="text-[12px] text-slate-400 mt-0.5">{fmtDate(date)} · 현재 {curShift} · 작성할 점검표를 선택하세요</div>
+            {askRows.map(row=>(
+              <div key={row.shift+row.pno} className="mt-4 border border-slate-200 rounded-xl p-3">
+                <div className="font-bold text-slate-800 text-[14.5px]">{row.name||"-"}
+                  <span className="ml-1.5 text-[11px] text-slate-400 font-semibold">{row.pno}{row.shift!==curShift?` · ${row.shift}`:""}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mt-2.5">
+                  {[["startup","Start Up"],["dock","Dock Audit"]].map(([t,label])=>{
+                    const rec = recOf(t,row);
+                    const st = !rec ? {txt:"미작성", cls:"text-slate-400"}
+                      : rec.status==="draft" ? {txt:"임시저장", cls:"text-amber-600"}
+                      : rec.status==="pending" ? {txt:"결재중", cls:"text-sky-600"}
+                      : {txt:"✓ 작성 완료", cls:"text-emerald-600"};
+                    const m = TYPE_META[t]||{};
+                    return (
+                      <button key={t}
+                        onClick={()=>{ setLineAsk(false);
+                          if(!rec) onCreate(t, {line:row.line, name:row.name, pno:row.pno, date, shift:row.shift});
+                          else if(rec.status==="draft") onEdit(rec);
+                          else onOpen(rec); }}
+                        className="rounded-xl border-2 py-3 px-2 text-center bg-white" style={{borderColor:m.accent||"#cbd5e1"}}>
+                        <div className="font-extrabold text-[14px]" style={{color:m.accent||"#334155"}}>{label}</div>
+                        <div className={`text-[11.5px] font-bold mt-1 ${st.cls}`}>{st.txt}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            <button onClick={()=>setLineAsk(false)} className="mt-4 w-full py-2.5 rounded-xl border border-slate-300 text-slate-500 font-bold text-[13.5px]">목록으로 보기</button>
+          </div>
+        </div>
+      )}
+
+      {noPlanAsk && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-5" onClick={()=>setNoPlanAsk(false)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+            <div className="text-[16px] font-extrabold text-slate-800">📍 {focusName||lineFocus}</div>
+            <p className="mt-2 text-[13.5px] text-slate-600 leading-relaxed">
+              {fmtDate(date)} 오늘 이 라인의 생산계획이 없습니다.<br/>그래도 입력하시겠습니까?
+            </p>
+            <p className="mt-1 text-[11.5px] text-slate-400">라인·날짜·주야({curShift})만 채워지고 품명·품번은 직접 선택합니다.</p>
+            <div className="mt-5 space-y-2">
+              <button onClick={()=>createManual("startup")}
+                className="w-full py-2.5 rounded-xl text-white font-bold text-[14px]" style={{background:(TYPE_META.startup||{}).accent||"#0f172a"}}>Start Up 작성</button>
+              <button onClick={()=>createManual("dock")}
+                className="w-full py-2.5 rounded-xl text-white font-bold text-[14px]" style={{background:(TYPE_META.dock||{}).accent||"#334155"}}>Dock Audit 작성</button>
+              <button onClick={()=>setNoPlanAsk(false)}
+                className="w-full py-2.5 rounded-xl border border-slate-300 text-slate-500 font-bold text-[14px]">취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {lineFocus && (
+        <div className="rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 flex items-center gap-2">
+          <span className="text-[15px]">📍</span>
+          <div>
+            <div className="text-[13.5px] font-extrabold text-indigo-800">{focusName||lineFocus} 라인 모드</div>
+            <div className="text-[11px] text-indigo-400">{fmtDate(date)} · 이 라인 품목만 표시 (현재 {curShift})</div>
+          </div>
+          <button onClick={onClearFocus} className="ml-auto px-3 py-1.5 rounded-lg bg-white border border-indigo-200 text-indigo-600 text-[12px] font-bold">전체 보기</button>
+        </div>
+      )}
+
+      {!lineFocus && <div className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 flex items-center gap-3">
         <span className="text-[14px]">📋</span>
         <div>
           <div className="text-[13px] font-extrabold text-slate-700">조회일지</div>
           <div className="text-[11px] text-slate-400">{fmtDate(date)}{brf&&brf.writer?` · 작성 ${brf.writer}`:""}</div>
         </div>
         <div className="ml-auto"><BrfBtn/></div>
-      </div>
+      </div>}
 
       {!hasPlan && (
         <div className="text-[13px] text-slate-500 bg-white border border-slate-200 rounded-2xl p-5 text-center leading-relaxed">
@@ -1060,7 +1178,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       )}
 
       {hasPlan && total===0 && (
-        <div className="text-center text-slate-400 py-14 text-[14px]">{fmtDate(date)} 기준 생산계획이 없습니다.</div>
+        <div className="text-center text-slate-400 py-14 text-[14px]">{fmtDate(date)} 기준 {lineFocus?`[${focusName||lineFocus}] 라인의 `:""}생산계획이 없습니다.</div>
       )}
 
       {total>0 && (
