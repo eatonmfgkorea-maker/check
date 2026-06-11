@@ -55,7 +55,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V026";
+const APP_VERSION = "V029";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -340,6 +340,20 @@ function cloneBriefingContent(target, src){
   };
 }
 
+// 유효 양식: 설정에서 수정한 양식이 있으면 그걸, 없으면 기본(TPL)
+function effTpl(type, settings){
+  const t = settings && settings.templates && settings.templates[type];
+  const base = TPL[type];
+  if(!t || !Array.isArray(t.items) || !t.items.length) return base;
+  return { ...base, doc: t.doc || base.doc, items: t.items };
+}
+// 문서에 저장된 양식 스냅샷 (구버전 문서는 기본 TPL로 폴백)
+function recTpl(r){
+  const base = TPL[r.type] || {};
+  if(r && r.tpl && Array.isArray(r.tpl.items) && r.tpl.items.length) return { ...base, doc: r.tpl.doc || base.doc, items: r.tpl.items };
+  return base;
+}
+
 function newRecord(type, settings){
   const base = {
     id: uid(), type, createdAt: nowStr(), updatedAt: nowStr(), status:"draft",
@@ -356,10 +370,12 @@ function newRecord(type, settings){
       deliveries:[], etc:["안전교육 - ","안전구호 - "],
     };
   }
-  // 점검표 공통
+  // 점검표 공통 — 설정의 양식(있으면)을 사용하고, 문서에 스냅샷 저장(이후 양식이 바뀌어도 기존 문서는 그대로)
+  const eff = effTpl(type, settings);
   const items={};
-  TPL[type].items.forEach(it=>{ items[it.no]={r:"",rm:"",q:""}; });
+  eff.items.forEach(it=>{ items[it.no]={r:"",rm:"",q:""}; });
   const r = { ...base,
+    tpl: { doc: eff.doc, items: eff.items.map(it=>({...it})) },
     line:"", name:"", part:"", model:"", shiftLeader:"",
     lot:"", prodDate: todayStr(), shift:"",
     items,
@@ -518,8 +534,9 @@ function App(){
   const planRef = useRef(planData);
   useEffect(()=>{ planRef.current = planData; }, [planData]);
 
-  const applyPlanRows = useCallback((rows, file, uploadedAt, source)=>{
-    setPlanData({rows, file:file||"", uploadedAt:uploadedAt||nowStr(), source:source||""});
+  const applyPlanRows = useCallback((rows, file, uploadedAt, source, maps)=>{
+    setPlanData({rows, file:file||"", uploadedAt:uploadedAt||nowStr(), source:source||"",
+      revMap:(maps&&maps.revMap)||{}, lineCodes:(maps&&maps.lineCodes)||{}});
     // 품목 마스터(라인/품명/품번)도 같은 데이터에서 생성 → 계획·작성 드롭다운이 항상 일치
     const m = masterFromPlanRows(rows);
     setSettings(prev=>({...prev, lines:m.lines, items:m.items, masterSource:"plan", masterLoadedAt:nowStr()}));
@@ -535,7 +552,7 @@ function App(){
       const cur = planRef.current||{};
       const shouldApply = manual || !(cur.rows&&cur.rows.length) || (remoteAt && remoteAt > (cur.uploadedAt||""));
       if(shouldApply){
-        const m = applyPlanRows(r.raw.rows, r.raw.file||"(Report)", remoteAt, "report");
+        const m = applyPlanRows(r.raw.rows, r.raw.file||"(Report)", remoteAt, "report", {revMap:r.raw.revMap, lineCodes:r.raw.lineCodes});
         setReportSync({state:"ok", msg:`Report 연동됨 · 라인 ${m.lines.length} · 품명 ${m.items.length}`});
       } else {
         setReportSync({state:"ok", msg:"로컬 계획이 최신"});
@@ -551,19 +568,29 @@ function App(){
       const wb = XLSX.read(rd.result, {type:"array"});
       const r = parsePlanExcel(wb);
       if(!r.ok){ alert(r.err||"계획 파일을 해석하지 못했습니다."); return; }
-      const m = applyPlanRows(r.rows, file.name, nowStr(), "upload");
+      const m = applyPlanRows(r.rows, file.name, nowStr(), "upload", extractLotMaps(wb));
       alert(`생산계획 ${r.rows.length}건 불러옴 (${r.sheet} 시트)\n품목 마스터 갱신: 라인 ${m.lines.length} · 품명 ${m.items.length}`);
     }catch(e){ alert("파일을 읽지 못했습니다: "+e); } };
     rd.readAsArrayBuffer(file);
   }, [applyPlanRows]);
   // 생산계획에서 점검표 바로 작성 (품번/품명/라인/날짜 미리 채움)
   const createFromPlan = useCallback((type, p)=>{
-    const rec = newRecord(type, settings);
-    rec.line = p.line||""; rec.name = p.name||""; rec.part = p.pno||""; rec.model = p.line||rec.model||"";
-    rec.shift = p.shift||"";
-    if(type==="dock") rec.checkDate = p.date; else rec.prodDate = p.date;
+    let rec = newRecord(type, settings);
+    if(type==="briefing"){
+      const latest = records.filter(x=>x.type==="briefing")
+        .sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""))[0];
+      if(latest) rec = cloneBriefingContent(rec, latest);
+      rec.date = p.date;
+    } else {
+      rec.line = p.line||""; rec.name = p.name||""; rec.part = p.pno||""; rec.model = p.line||rec.model||"";
+      rec.shift = p.shift||"";
+      if(type==="dock") rec.checkDate = p.date; else rec.prodDate = p.date;
+      // LOT 자동계산 (엑셀 오라클 바코드 규칙) — 수정 가능
+      const lot = calcLot(planRef.current, {date:p.date, shift:p.shift, line:p.line, pno:p.pno});
+      if(lot){ if(type==="dock") rec.batchNo = lot; else rec.lot = lot; }
+    }
     setEditing(rec);
-  }, [settings]);
+  }, [settings, records]);
 
   // 메일 링크(#inbox)로 들어오면 결재함 탭 자동 열기
   useEffect(()=>{ if((location.hash||"").toLowerCase().indexOf("inbox")>=0) setTab("inbox"); }, []);
@@ -676,7 +703,7 @@ function App(){
     return <Viewer rec={viewing} settings={settings} onClose={()=>setViewing(null)} />;
   }
   if(editing){
-    return <Editor rec={editing} settings={settings} records={records}
+    return <Editor rec={editing} settings={settings} records={records} planData={planData}
       onCancel={()=>setEditing(null)}
       onSaveDraft={(r)=>{ r.status="draft"; upsert(r); setEditing(null); setTab("list"); }}
       onSubmit={(r)=>{ r.status="pending"; r.approval.s1={name:r.approval.s1.name||r.shiftLeader||r.writer||"", approved:true, at:nowStr()}; upsert(r); { const nm=r.approval.s2.name, to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, [r]); } setEditing(null); setTab("inbox"); }}
@@ -912,14 +939,19 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     fmtDate(type==="dock" ? (r.checkDate||r.prodDate||r.createdAt) : (r.prodDate||r.createdAt)) === date &&
     (!r.shift || r.shift===row.shift));
 
-  const CL_TYPES = [["first","초도양산"],["startup","Start Up"],["dock","Dock Audit"]];
-  const missing = useMemo(()=> allRows.reduce((s,row)=> s + CL_TYPES.filter(([t])=>!recOf(t,row)).length, 0), [allRows, records, date]);
+  // 순서: Start Up → Dock Audit → 초도양산(선택). 미작성 카운트는 필수 항목만.
+  const CL_TYPES = [["startup","Start Up",true],["dock","Dock Audit",true],["first","초도양산",false]];
+  const missing = useMemo(()=> allRows.reduce((s,row)=> s + CL_TYPES.filter(([t,,req])=>req && !recOf(t,row)).length, 0), [allRows, records, date]);
 
-  const StatusBtn = ({type, row})=>{
+  const StatusBtn = ({type, row, optional})=>{
     const rec = recOf(type, row);
     if(!rec) return (
       <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date, shift:row.shift})}
-        className="w-full px-2 py-1.5 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 text-[12px] font-bold hover:border-slate-500 hover:text-slate-600">+ 작성</button>
+        className={`w-full px-2 py-1.5 rounded-lg border-2 border-dashed text-[12px] font-bold ${optional
+          ? "border-slate-200 text-slate-300 hover:border-slate-400 hover:text-slate-500"
+          : "border-slate-300 text-slate-400 hover:border-slate-500 hover:text-slate-600"}`}>
+        {optional?"작성 (선택)":"+ 작성"}
+      </button>
     );
     if(rec.status==="draft") return (
       <button onClick={()=>onEdit(rec)} className="w-full px-2 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[12px] font-bold border border-amber-200">임시저장 →</button>
@@ -946,9 +978,9 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
                 <th className="text-left px-3 py-1.5 font-bold">품명</th>
                 <th className="text-left px-3 py-1.5 font-bold w-[110px]">품번</th>
                 <th className="text-right px-3 py-1.5 font-bold w-[80px]">수량</th>
-                <th className="text-center px-2 py-1.5 font-bold w-[106px]">초도양산</th>
                 <th className="text-center px-2 py-1.5 font-bold w-[106px]">Start Up</th>
                 <th className="text-center px-2 py-1.5 font-bold w-[106px]">Dock Audit</th>
+                <th className="text-center px-2 py-1.5 font-bold w-[106px]">초도양산 <span className="font-normal text-slate-400">(선택)</span></th>
               </tr>
             </thead>
             <tbody>
@@ -958,7 +990,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
                   <td className="px-3 py-2 font-semibold text-slate-800">{row.name||"-"}</td>
                   <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.pno}</td>
                   <td className="px-3 py-2 text-right text-slate-600">{row.qty?row.qty.toLocaleString():"-"}</td>
-                  {CL_TYPES.map(([t])=> <td key={t} className="px-2 py-1.5"><StatusBtn type={t} row={row}/></td>)}
+                  {CL_TYPES.map(([t,,req])=> <td key={t} className="px-2 py-1.5"><StatusBtn type={t} row={row} optional={!req}/></td>)}
                 </tr>
               ))}
             </tbody>
@@ -970,6 +1002,16 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
 
   const rs = reportSync||{state:"idle"};
   const srcLabel = !hasPlan ? "" : (planData.source==="report" ? "Production 보고 연동" : "직접 업로드");
+
+  // 선택 날짜의 조회일지
+  const brf = useMemo(()=> records.find(r=>r.type==="briefing" && fmtDate(r.date)===date), [records, date]);
+  const BrfBtn = ()=>{
+    if(!brf) return <button onClick={()=>onCreate("briefing",{date})}
+      className="px-3 py-1.5 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 text-[12px] font-bold hover:border-slate-500 hover:text-slate-600">+ 작성</button>;
+    if(brf.status==="draft") return <button onClick={()=>onEdit(brf)} className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[12px] font-bold border border-amber-200">임시저장 →</button>;
+    if(brf.status==="pending") return <button onClick={()=>onOpen(brf)} className="px-3 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-[12px] font-bold border border-sky-200">결재중</button>;
+    return <button onClick={()=>onOpen(brf)} className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-[12px] font-bold border border-emerald-200">✓ 완료</button>;
+  };
 
   return (
     <div className="space-y-3">
@@ -992,6 +1034,15 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
           {hasPlan?`${srcLabel} · ${planData.file} (${fmtDate(planData.uploadedAt)})`:""}
           {rs.state==="err" && <span className="text-rose-400"> · {rs.msg}</span>}
         </span>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 flex items-center gap-3">
+        <span className="text-[14px]">📋</span>
+        <div>
+          <div className="text-[13px] font-extrabold text-slate-700">조회일지</div>
+          <div className="text-[11px] text-slate-400">{fmtDate(date)}{brf&&brf.writer?` · 작성 ${brf.writer}`:""}</div>
+        </div>
+        <div className="ml-auto"><BrfBtn/></div>
       </div>
 
       {!hasPlan && (
@@ -1022,7 +1073,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
 /* ============================================================
    작성 선택
    ============================================================ */
-function NewView({onPick}){
+function NewView({settings, onPick}){
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {TYPE_ORDER.map(t=>{ const m=TYPE_META[t]; return (
@@ -1030,7 +1081,7 @@ function NewView({onPick}){
           className="text-left rounded-2xl border border-slate-200 bg-white p-5 hover:shadow-md transition">
           <div className="w-10 h-10 rounded-xl grid place-items-center font-black text-white mb-3" style={{background:m.accent}}>{m.short[0]}</div>
           <div className="font-extrabold text-slate-800">{m.label}</div>
-          <div className="text-[12px] text-slate-400 mt-0.5">{t==="briefing"?"일자별 조회 내용·전달사항 기록":(TPL[t].doc)}</div>
+          <div className="text-[12px] text-slate-400 mt-0.5">{t==="briefing"?"일자별 조회 내용·전달사항 기록":(effTpl(t, settings||{}).doc)}</div>
         </button>
       ); })}
     </div>
@@ -1040,7 +1091,7 @@ function NewView({onPick}){
 /* ============================================================
    에디터
    ============================================================ */
-function Editor({rec, settings, records, onCancel, onSaveDraft, onSubmit}){
+function Editor({rec, settings, records, planData, onCancel, onSaveDraft, onSubmit}){
   const [r, setR] = useState(()=>JSON.parse(JSON.stringify(rec)));
   const meta = TYPE_META[r.type];
   const set = (patch)=>setR(prev=>({...prev, ...patch}));
@@ -1081,7 +1132,7 @@ function Editor({rec, settings, records, onCancel, onSaveDraft, onSubmit}){
       <main className="max-w-3xl mx-auto px-4 pt-5 space-y-5">
         {r.type==="briefing"
           ? <BriefingFields r={r} set={set} setR={setR} settings={settings} onLoadRecent={loadRecent} hasRecent={!!latestBriefing} recentDate={latestBriefing?latestBriefing.date:""}/>
-          : <ChecklistFields r={r} set={set} setR={setR} settings={settings}/>}
+          : <ChecklistFields r={r} set={set} setR={setR} settings={settings} planData={planData}/>}
 
         {/* 결재선 */}
         <section className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -1125,8 +1176,15 @@ function PeopleSelect({list, value, onChange}){
 }
 
 /* ---- 점검표 입력 ---- */
-function ChecklistFields({r, set, setR, settings}){
-  const tpl = TPL[r.type];
+function ChecklistFields({r, set, setR, settings, planData}){
+  const tpl = recTpl(r);
+  const autoLot = ()=>{
+    if(!r.shift){ alert("주/야를 먼저 선택하세요. (LOT 계산에 필요)"); return; }
+    const date = r.type==="dock" ? (r.checkDate||r.prodDate) : r.prodDate;
+    const lot = calcLot(planData, {date, shift:r.shift, line:r.line, pno:r.part});
+    if(!lot){ alert("LOT을 계산하지 못했습니다.\n생산계획(라인코드/REV 맵 포함)이 연동되어 있고, 라인·품번·날짜가 계획과 일치하는지 확인하세요."); return; }
+    if(r.type==="dock") set({batchNo:lot}); else set({lot});
+  };
   const setItem = (no, patch)=> setR(prev=>({...prev, items:{...prev.items, [no]:{...prev.items[no], ...patch}}}));
   const setPA = (patch)=> setR(prev=>({...prev, productAudit:{...prev.productAudit, ...patch}}));
 
@@ -1158,12 +1216,24 @@ function ChecklistFields({r, set, setR, settings}){
             </select>
           </Field>
           {r.type==="dock" ? <>
-            <Field label="Batch No."><input className={inputCls} value={r.batchNo} onChange={e=>set({batchNo:e.target.value})}/></Field>
+            <Field label="Batch No.">
+              <div className="flex gap-1.5">
+                <input className={inputCls+" flex-1"} value={r.batchNo} onChange={e=>set({batchNo:e.target.value})}/>
+                <button type="button" onClick={autoLot} title="생산계획 기준 LOT 자동계산"
+                  className="px-2.5 rounded-lg border border-slate-300 text-[12px] font-bold text-slate-500 whitespace-nowrap">자동</button>
+              </div>
+            </Field>
             <Field label="검사일"><input type="date" className={inputCls} value={r.checkDate} onChange={e=>set({checkDate:e.target.value})}/></Field>
             <Field label="생산수량(Batch)"><input className={inputCls} inputMode="numeric" value={r.batchSize} onChange={e=>set({batchSize:e.target.value})}/></Field>
             <Field label={`검사수량(Sampling)${recoSize?` · 권장 ${recoSize}`:""}`}><input className={inputCls} value={r.samplingSize} onChange={e=>set({samplingSize:e.target.value})}/></Field>
           </> : <>
-            <Field label="Batch(Lot) No."><input className={inputCls} value={r.lot} onChange={e=>set({lot:e.target.value})}/></Field>
+            <Field label="Batch(Lot) No.">
+              <div className="flex gap-1.5">
+                <input className={inputCls+" flex-1"} value={r.lot} onChange={e=>set({lot:e.target.value})}/>
+                <button type="button" onClick={autoLot} title="생산계획 기준 LOT 자동계산"
+                  className="px-2.5 rounded-lg border border-slate-300 text-[12px] font-bold text-slate-500 whitespace-nowrap">자동</button>
+              </div>
+            </Field>
             <Field label="생산 일자"><input type="date" className={inputCls} value={r.prodDate} onChange={e=>set({prodDate:e.target.value})}/></Field>
           </>}
         </div>
@@ -1298,6 +1368,52 @@ function recTitle(r){ return r.type==="briefing" ? `조회일지 · ${fmtDate(r.
 // 품번 비교용 정규화: 대소문자/공백/하이픈/언더스코어 차이 무시 (20904F-CKD ≡ 20904f ckd)
 function normPno(s){ return String(s||"").toUpperCase().replace(/[\s\-_./]/g,""); }
 function samePno(a,b){ const x=normPno(a), y=normPno(b); return !!x && x===y; }
+function normLine(s){ return String(s||"").toUpperCase().replace(/[\s\-_./]/g,""); }
+
+/* 계획 엑셀에서 LOT 자동계산용 맵 추출: 모품목(품번→REV) + 오라클바코드출력용(라인명→라인코드) */
+function extractLotMaps(wb){
+  const revMap={}, lineCodes={};
+  try{
+    const wsM = wb.Sheets["모품목"];
+    if(wsM && wsM["!ref"]){
+      const rg = XLSX.utils.decode_range(wsM["!ref"]);
+      for(let r=2; r<=rg.e.r; r++){
+        const i=wsM[XLSX.utils.encode_cell({r,c:8})], j=wsM[XLSX.utils.encode_cell({r,c:9})];   // I, J열
+        if(i&&j&&i.v!=null&&j.v!=null&&String(i.v).trim()&&String(j.v).trim()) revMap[normPno(i.v)]=String(j.v).trim();
+      }
+    }
+    const wsB = wb.Sheets["오라클 바코드출력용"];
+    if(wsB && wsB["!ref"]){
+      for(let r=3; r<=20; r++){                                  // A4:B21
+        const a=wsB[XLSX.utils.encode_cell({r,c:0})], b=wsB[XLSX.utils.encode_cell({r,c:1})];
+        if(a&&b&&a.v!=null&&b.v!=null&&String(a.v).trim()&&String(b.v).trim()) lineCodes[normLine(a.v)]=String(b.v).trim();
+      }
+    }
+  }catch(e){}
+  return {revMap, lineCodes};
+}
+
+/* LOT(JOB Number) 자동계산 — 엑셀 '오라클 바코드출력용' 규칙 그대로:
+   REV코드(모품목) + 라인코드 + YYMMDD + 주야(주간 A/야간 B) + 당일 같은 라인 품목 순번 */
+function calcLot(planData, t){   // t: {date, shift, line, pno}
+  if(!planData || !t || !t.date) return "";
+  const lc = (planData.lineCodes||{})[normLine(t.line)] || "";
+  if(!lc) return "";
+  const rev = (planData.revMap||{})[normPno(t.pno)] || "";
+  const ymd = String(t.date).slice(2,10).replace(/-/g,"");
+  const sc = t.shift==="야간" ? "B" : "A";
+  let seq=0; const seen=new Set();
+  for(const r of (planData.rows||[])){
+    if(r.date!==t.date || r.shift!==t.shift) continue;
+    if(((planData.lineCodes||{})[normLine(r.line)]||"")!==lc) continue;
+    const k=normPno(r.pno);
+    if(seen.has(k)) continue;
+    seen.add(k);
+    if(samePno(r.pno, t.pno)){ seq=seen.size; break; }
+  }
+  if(!seq) seq=1;
+  return rev+lc+ymd+sc+seq;
+}
 
 // 결재 요청 메일 (여러 건을 한 통으로). recs: 같은 결재자에게 갈 문서 배열
 function buildApprovalListMail(recs, toName){
@@ -1544,7 +1660,7 @@ function AdminGate({adminPw, onUnlock, onCancel}){
 
 function SettingsView({settings, setSettings, planData}){
   const [sub, setSub] = useState("master");
-  const tabs = [["master","품목 (생산계획 기준)"],["people","인원/결재"],["briefing","조회일지 기본값"]];
+  const tabs = [["master","품목 (생산계획 기준)"],["tpl","점검표 양식"],["people","인원/결재"],["briefing","조회일지 기본값"]];
   return (
     <div>
       <div className="flex gap-1 mb-4 border-b border-slate-200">
@@ -1552,6 +1668,7 @@ function SettingsView({settings, setSettings, planData}){
           className={`px-3 py-2 text-[13px] font-bold border-b-2 ${sub===k?"border-slate-900 text-slate-900":"border-transparent text-slate-400"}`}>{t}</button>)}
       </div>
       {sub==="master" && <MasterSettings settings={settings} planData={planData}/>}
+      {sub==="tpl" && <TemplateSettings settings={settings} setSettings={setSettings}/>}
       {sub==="people" && <PeopleSettings settings={settings} setSettings={setSettings}/>}
       {sub==="briefing" && <BriefingSettings settings={settings} setSettings={setSettings}/>}
     </div>
@@ -1624,6 +1741,113 @@ function MasterSettings({settings, planData}){
           </div>
         )}
         <p className="text-[11px] text-slate-400 mt-2">※ 여기서 수정하지 않습니다. 생산계획 엑셀이 바뀌면 자동으로 따라갑니다.</p>
+      </div>
+    </div>
+  );
+}
+
+function TemplateSettings({settings, setSettings}){
+  const TYPES=[["startup","Start Up"],["dock","Dock Audit"],["first","초도양산점검표"]];
+  const [t,setT]=useState("startup");
+  const base = TPL[t];
+  const cur = (settings.templates && settings.templates[t]) || null;
+  const doc = cur && cur.doc!=null ? cur.doc : base.doc;
+  const items = cur && Array.isArray(cur.items) && cur.items.length ? cur.items : base.items.map(it=>({...it}));
+  const phases = ["양산 전","양산","출하"];
+
+  const save=(nextDoc, nextItems)=>{
+    const renum = nextItems.map((it,i)=>({...it, no:i+1}));
+    setSettings(p=>({...p, templates:{...(p.templates||{}), [t]:{doc:nextDoc, items:renum}}}));
+  };
+  const setDoc=(v)=> save(v, items);
+  const upd=(i,patch)=> save(doc, items.map((it,j)=>j===i?{...it,...patch}:it));
+  const del=(i)=>{ if(!confirm(`${i+1}번 항목을 삭제할까요?`)) return; save(doc, items.filter((_,j)=>j!==i)); };
+  const add=()=> save(doc, [...items, {no:items.length+1, ...(t==="first"?{ph:"양산"}:{}) , t:"", m:""}]);
+  const move=(i,dir)=>{ const j=i+dir; if(j<0||j>=items.length) return; const a=[...items]; [a[i],a[j]]=[a[j],a[i]]; save(doc,a); };
+  const reset=()=>{ if(!confirm("이 점검표 양식을 기본값으로 되돌릴까요?")) return;
+    setSettings(p=>{ const m={...(p.templates||{})}; delete m[t]; return {...p, templates:m}; }); };
+  const isCustom = !!cur;
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-0.5">
+            {TYPES.map(([k,label])=>(
+              <button key={k} onClick={()=>setT(k)}
+                className={`px-3 py-1.5 rounded-lg text-[13px] font-bold ${t===k?"bg-slate-900 text-white":"text-slate-500"}`}>{label}</button>
+            ))}
+          </div>
+          <span className={`text-[11px] font-bold px-2 py-0.5 rounded ${isCustom?"text-sky-700 bg-sky-50":"text-slate-400 bg-slate-100"}`}>{isCustom?"수정됨":"기본 양식"}</span>
+          {isCustom && <button onClick={reset} className="ml-auto text-[12px] px-3 py-1.5 rounded-lg border border-slate-300 text-slate-500 font-semibold">기본 양식으로 되돌리기</button>}
+        </div>
+        <p className="text-[12px] text-slate-400 mt-2.5 leading-relaxed">
+          여기서 수정한 양식은 <b>앞으로 새로 작성하는 문서부터</b> 적용됩니다. 이미 작성/결재된 문서는 작성 당시 양식 그대로 보존돼요.
+        </p>
+        <div className="mt-3 max-w-xs">
+          <Field label="Doc No."><input className={inputCls} value={doc} onChange={e=>setDoc(e.target.value)}/></Field>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="flex items-center justify-between mb-2">
+          <div className="font-bold text-slate-700 text-[14px]">점검 항목 ({items.length})</div>
+          <button onClick={add} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[12px] font-bold">+ 항목 추가</button>
+        </div>
+        <div className="space-y-2">
+          {items.map((it,i)=>(
+            <div key={i} className="flex gap-2 items-start border border-slate-100 rounded-xl p-2.5">
+              <div className="w-7 h-7 rounded-lg bg-slate-100 grid place-items-center text-[12px] font-bold text-slate-500 shrink-0 mt-0.5">{i+1}</div>
+              <div className="flex-1 space-y-1.5">
+                <div className="flex gap-1.5">
+                  {t==="first" && (
+                    <select className="px-2 py-1.5 rounded-lg border border-slate-300 text-[12px] w-24 shrink-0" value={it.ph||"양산"} onChange={e=>upd(i,{ph:e.target.value})}>
+                      {phases.map(p=><option key={p} value={p}>{p}</option>)}
+                    </select>
+                  )}
+                  <input className="flex-1 px-2 py-1.5 rounded-lg border border-slate-300 text-[12px]" placeholder="검사방법 (예: E-Mail, 라벨…)"
+                    value={it.m||""} onChange={e=>upd(i,{m:e.target.value})}/>
+                </div>
+                <textarea className="w-full px-2 py-1.5 rounded-lg border border-slate-300 text-[13px]" rows={2} placeholder="점검 내용"
+                  value={it.t||""} onChange={e=>upd(i,{t:e.target.value})}/>
+              </div>
+              <div className="flex flex-col gap-1 shrink-0">
+                <button className="w-6 h-6 grid place-items-center rounded text-slate-300 hover:text-slate-600 hover:bg-slate-100 text-[11px]" onClick={()=>move(i,-1)}>▲</button>
+                <button className="w-6 h-6 grid place-items-center rounded text-slate-300 hover:text-slate-600 hover:bg-slate-100 text-[11px]" onClick={()=>move(i,1)}>▼</button>
+                <button className="w-6 h-6 grid place-items-center rounded text-slate-300 hover:text-rose-500 hover:bg-rose-50 text-[11px]" onClick={()=>del(i)}>✕</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ListEditor({title, hint, items, onChange}){
+  const [nw,setNw]=useState("");
+  const list = items||[];
+  const add=()=>{ const v=nw.trim(); if(!v) return; if(list.includes(v)){ setNw(""); return; } onChange([...list, v]); setNw(""); };
+  const del=(i)=> onChange(list.filter((_,x)=>x!==i));
+  const update=(i,v)=> onChange(list.map((x,j)=>j===i?v:x));
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="font-bold text-slate-700">{title}</div>
+      {hint && <p className="text-[12px] text-slate-400 mt-0.5">{hint}</p>}
+      <div className="mt-2 flex gap-2">
+        <input className="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-[13px]" placeholder="추가할 항목 입력"
+          value={nw} onChange={e=>setNw(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }}/>
+        <button className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-bold" onClick={add}>추가</button>
+      </div>
+      <div className="mt-2 space-y-1">
+        {list.length===0 && <p className="text-[12px] text-slate-300 py-1">등록된 항목이 없습니다.</p>}
+        {list.map((v,i)=>(
+          <div key={i} className="flex items-center gap-2">
+            <input className="flex-1 px-2 py-1.5 rounded-lg border border-transparent hover:border-slate-200 focus:border-slate-300 text-[13px]"
+              value={v} onChange={e=>update(i,e.target.value)}/>
+            <button className="text-slate-300 hover:text-rose-500 px-1" onClick={()=>del(i)}>✕</button>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1814,7 +2038,7 @@ function SignBox({rec}){
 }
 
 function PrintChecklist({r}){
-  const tpl = TPL[r.type]; const dock = tpl.dockCols;
+  const tpl = recTpl(r); const dock = tpl.dockCols;
   const mark = (cell, want)=> (cell.r===want ? <span className="mark">✓</span> : "");
   // 헤더 정보 행
   const headerRows = dock
