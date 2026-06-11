@@ -11,9 +11,13 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 <style>
   * { -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Pretendard', -apple-system, sans-serif; background:#eef1f5; }
+  /* 태블릿(가로 700px 이상)에서는 전체 UI를 키워서 보기 편하게 */
+  @media screen and (min-width: 700px) { body { zoom: 1.22; } }
+  @media screen and (min-width: 1100px) { body { zoom: 1.3; } }
   .serif-sign { font-family: 'Batang','바탕','Times New Roman',serif; }
   input, select, textarea { font-family: inherit; }
   textarea { resize: vertical; }
@@ -30,7 +34,7 @@
   /* 인쇄 영역 */
   .sheet { background:#fff; color:#111; }
   @media print {
-    body { background:#fff !important; }
+    body { background:#fff !important; zoom: 1 !important; }
     .no-print { display:none !important; }
     .print-root { position:absolute; inset:0; margin:0; padding:0; }
     .sheet { box-shadow:none !important; border:none !important; width:100% !important; }
@@ -51,23 +55,24 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V017";
+const APP_VERSION = "V026";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
 const GAS_URL = "https://script.google.com/macros/s/AKfycbx5PYLCxncWe33YZZJ8I9Xar8AHNncQxMZdoxolR0JR28DU7chKZHGWxXfmsYCjv5jF/exec";
 
-// ▼ 생산관리시스템(FE) 백업 엔드포인트. fe-backup-*.json 의 설정(라인/품명/품번)을 자동으로 불러옵니다.
-const PROD_GAS_URL = "https://script.google.com/macros/s/AKfycbxLFrxbAaBt1bBa3SUdDY9wY48tvt85mEDaj3tiKhyw_R7oJCC9GbOWLfWbdSohnQtB/exec";
-
 // ▼ 이 앱이 배포된 주소 (결재 알림 메일의 "결재하러 가기" 링크에 사용). 실제 호스팅 주소로 맞추세요.
 const APP_URL = "https://eatonmfgkorea-maker.github.io/check/";
 
+// ▼ Production 보고(MFG Report) 백업 엔드포인트 — Report에 올린 FE 생산계획 원본을 자동으로 가져옵니다.
+const REPORT_GAS_URL = "https://script.google.com/macros/s/AKfycbxLFrxbAaBt1bBa3SUdDY9wY48tvt85mEDaj3tiKhyw_R7oJCC9GbOWLfWbdSohnQtB/exec";
+
 const LS_RECORDS  = "mfg_cl_records_v1";
 const LS_SETTINGS = "mfg_cl_settings_v1";
+const LS_PLAN     = "mfg_cl_plan_v1";
 const IDB_NAME = "mfg_cl_db", IDB_STORE = "kv";
 
-// 생산관리시스템 FE 설정 스냅샷 (라이브 연동 실패 시 사용, 연결되면 자동 갱신)
+// 초기 품목 기본값 (생산계획 엑셀을 올리면 그걸로 대체됨)
 const FE_SEED = { savedAt: "2026-06-05T02:49:15.284Z", lines: ["FTIV","OLD ICV","FLVV","NEW ICV","Manual GVV","Auto GVV","LVS","UCC","COMOBO FLVV","MEMBRANE","Manual FLVV","ATV"], items: [{item:"FTIV 3.0",lineName:"FTIV",partNos:["629456C","X629456C"]},{item:"LMs GSL",lineName:"OLD ICV",partNos:["20805C-1"]},{item:"LMs DSL",lineName:"OLD ICV",partNos:["20903C-1"]},{item:"E2XX",lineName:"FLVV",partNos:["628802A"]},{item:"INSERT NON SEALING ICV",lineName:"OLD ICV",partNos:["20904F-CKD","20904K-F"]},{item:"INSERT SEALING ICV",lineName:"OLD ICV",partNos:["20905J-K"]},{item:"MEMBRANE VALVE",lineName:"MEMBRANE",partNos:["626616E-1"]},{item:"FCA(OMEGA) 38mm",lineName:"OLD ICV",partNos:["626887B"]},{item:"TQ NON SEAL UREA",lineName:"NEW ICV",partNos:["627942B"]},{item:"TQ SCR UREA",lineName:"NEW ICV",partNos:["626997A-4"]},{item:"EU SCR ICV",lineName:"NEW ICV",partNos:["626917A-6"]},{item:"LX3 LQ2",lineName:"UCC",partNos:["629528A-4"]},{item:"T1XX HD (FLVV)",lineName:"UCC",partNos:["629922A"]},{item:"T300 GAMMA",lineName:"Manual GVV",partNos:["20690B-G-3"]},{item:"RG3 2PORT GVV",lineName:"Manual GVV",partNos:["627897A-1"]},{item:"RG3 1PORT ROV",lineName:"Manual GVV",partNos:["627895A-1"]},{item:"JX1 GVV",lineName:"Manual GVV",partNos:["628304A-1"]},{item:"HI 2PORT ROV",lineName:"Manual GVV",partNos:["627326A-2"]},{item:"HI 1PORT GVV",lineName:"Manual GVV",partNos:["627187A-2"]},{item:"FCA",lineName:"Manual GVV",partNos:["628296A"]},{item:"EU FLV SINGLE",lineName:"Manual GVV",partNos:["626929A-1"]},{item:"EU FLV COMBO",lineName:"Manual GVV",partNos:["627014A-1"]},{item:"BH",lineName:"Manual GVV",partNos:["20545D-3"]},{item:"1K ROV LX3",lineName:"Auto GVV",partNos:["629530A-DM-1"]},{item:"2K ROV LX3",lineName:"Auto GVV",partNos:["629531A-DM-1"]},{item:"W/ATV(B515)",lineName:"Auto GVV",partNos:["626427B-4"]},{item:"MD OPR",lineName:"Auto GVV",partNos:["20919F-8"]},{item:"OS GVV",lineName:"Auto GVV",partNos:["626632A-4-OS"]},{item:"D2UX-2",lineName:"FLVV",partNos:["628803A"]},{item:"C1XX",lineName:"FLVV",partNos:["628805B"]},{item:"31XX",lineName:"FLVV",partNos:["628798A-2"]},{item:"GM GEM PL8",lineName:"FLVV",partNos:["630060A"]},{item:"SX2B HEV",lineName:"FLVV",partNos:["627615B-CB"]},{item:"MODULE FLVV",lineName:"FLVV",partNos:["628268B"]},{item:"SU2/SP2 MODULE FLVV",lineName:"FLVV",partNos:["628187B"]},{item:"NP MODULE FLVV",lineName:"FLVV",partNos:["627398A"]},{item:"RG3(M3)",lineName:"Manual FLVV",partNos:["627899C-1"]},{item:"SU2",lineName:"COMOBO FLVV",partNos:["628188B"]},{item:"SP2",lineName:"COMOBO FLVV",partNos:["628556B-2"]},{item:"NP COMBO",lineName:"COMOBO FLVV",partNos:["627890B-2"]},{item:"JX1 HEV",lineName:"LVS",partNos:["X630205"]},{item:"JX1 ROV",lineName:"LVS",partNos:["628266A-1"]},{item:"JX1 COMBO",lineName:"LVS",partNos:["628265D-1"]},{item:"FCA PHEV COMBO",lineName:"LVS",partNos:["628065C-1"]},{item:"Ada",lineName:"FLVV",partNos:["627068B"]},{item:"ATV SUB-ASSEMBLY",lineName:"ATV",partNos:["20453A-1"]},{item:"INSERT NON SEALING ICV_N",lineName:"NEW ICV",partNos:["20904F-CKD","20904F","20904F-K","20904F-KD"]},{item:"JX1-MODULE",lineName:"FLVV",partNos:["628268B"]},{item:"NX5e 1K",lineName:"Auto GVV",partNos:["630211"]},{item:"MX5a",lineName:"UCC",partNos:["630218"]},{item:"NX5a",lineName:"UCC",partNos:["630213"]},{item:"NX5e",lineName:"UCC",partNos:["630214"]},{item:"T1XX LD",lineName:"FLVV",partNos:["629396"]},{item:"T1XX GS03-LD",lineName:"FLVV",partNos:["629398"]},{item:"FTIV(Rework)",lineName:"FTIV",partNos:["629456C(Rework)"]},{item:"HM DSL",lineName:"Manual GVV",partNos:["20568"]}] };
 
 
@@ -153,83 +158,107 @@ const DEFAULT_NOTICES = [
 const DEFAULT_DELIVERY_CATS = ["LVS","FTIV","UCC","FLVV AUTO","ICV","ES","SUB","Membrane","GVV","기타"];
 
 
-/* 생산관리시스템 백업(payload) 안에서 FE 설정(라인/품명/품번) 추출 — 저장 구조가 달라도 견디도록 깊게 탐색 */
-function findFENode(obj){
-  if(!obj || typeof obj!=="object") return null;
-  if(obj.FE && typeof obj.FE==="object" && (Array.isArray(obj.FE.items)||Array.isArray(obj.FE.lines))) return obj.FE;
-  for(const k in obj){ const r=findFENode(obj[k]); if(r) return r; }
-  return null;
-}
-function collectMaster(node, acc, seen){
-  if(!node || typeof node!=="object" || seen.has(node)) return;
-  seen.add(node);
-  if(Array.isArray(node.lines)) node.lines.forEach(l=>{
-    if(typeof l==="string"){ if(l.trim()) acc.lines.add(l.trim()); }
-    else if(l && typeof l==="object" && l.name){ acc.lines.add(String(l.name)); }
-  });
-  if(Array.isArray(node.items)) node.items.forEach(it=>{
-    if(!it || typeof it!=="object") return;
-    const name = it.item || it.name || it["품명"];
-    if(!name) return;
-    const lineName = it.lineName || it.line || "";
-    const pnos = Array.isArray(it.partNos)
-      ? it.partNos.map(p=> typeof p==="string" ? p : (p && (p.partNo||p["품번"]))).filter(Boolean)
-      : [];
-    acc.items.push({item:String(name), lineName:String(lineName||""), partNos:pnos.map(String)});
-  });
-  for(const k in node){ if(node[k] && typeof node[k]==="object") collectMaster(node[k], acc, seen); }
-}
-function extractFEMaster(payload){
-  const acc={lines:new Set(), items:[]};
-  const feNode = findFENode(payload);
-  collectMaster(feNode || payload, acc, new Set());
-  // 품명별 병합 (lineName 유지, partNos 합치기)
-  const m=new Map();
-  acc.items.forEach(({item,lineName,partNos})=>{
-    if(!m.has(item)) m.set(item, {item, lineName:lineName||"", partNos:new Set()});
-    const e=m.get(item);
-    if(!e.lineName && lineName) e.lineName=lineName;
-    partNos.forEach(p=>e.partNos.add(p));
-  });
-  return { lines:[...acc.lines], items:[...m.values()].map(e=>({item:e.item, lineName:e.lineName, partNos:[...e.partNos]})) };
-}
-
-async function fetchProdFEMaster(){
-  if(!PROD_GAS_URL) return {ok:false, off:true};
+/* Production 보고(MFG Report)가 백업한 FE 생산계획 원본(fePlanRaw) 가져오기 — mfg-settings-*.json */
+async function fetchReportPlanRaw(){
+  if(!REPORT_GAS_URL) return {ok:false, err:"연동 미설정"};
   try{
-    const listRes = await fetch(PROD_GAS_URL + "?action=list");
+    const listRes = await fetch(REPORT_GAS_URL + "?action=list");
     const list = await listRes.json();
     if(!list.ok || !Array.isArray(list.files)) return {ok:false, err:"목록 조회 실패"};
-    const fe = list.files.filter(f=>/fe-backup-/i.test(f.name||"")).sort((a,b)=>(b.name||"").localeCompare(a.name||""));
-    if(fe.length===0) return {ok:false, err:"fe-backup 파일을 찾지 못함"};
-    const loadRes = await fetch(PROD_GAS_URL + "?action=load&id=" + encodeURIComponent(fe[0].id));
-    const loaded = await loadRes.json();
-    if(!loaded.ok || !loaded.data) return {ok:false, err:"파일 불러오기 실패"};
-    const m = extractFEMaster(loaded.data);
-    return {ok:true, lines:m.lines, items:m.items, file:fe[0].name, via:"drive"};
+    const fl = list.files.filter(f=>/mfg-settings-/i.test(f.name||"")).sort((a,b)=>(b.name||"").localeCompare(a.name||""));
+    if(fl.length===0) return {ok:false, err:"Report 백업 없음"};
+    const loadRes = await fetch(REPORT_GAS_URL + "?action=load&id=" + encodeURIComponent(fl[0].id));
+    const j = await loadRes.json();
+    if(!j.ok || !j.data) return {ok:false, err:"파일 불러오기 실패"};
+    const raw = j.data.fePlanRaw || (j.data.data && j.data.data.fePlanRaw) || null;
+    if(!raw || !Array.isArray(raw.rows) || !raw.rows.length) return {ok:false, err:"Report에 계획 원본 없음 (Report 새 버전에서 FE 계획을 한 번 올려야 함)"};
+    return {ok:true, raw, file:fl[0].name};
   }catch(e){ return {ok:false, err:String(e)}; }
 }
 
-/* 같은 브라우저(동일 사이트)에 열려있던 FE 생산관리시스템의 localStorage 설정을 탐색 */
-function scanLocalForFEMaster(){
-  try{
-    for(let i=0;i<localStorage.length;i++){
-      const k=localStorage.key(i);
-      if(!k || k.indexOf("mfg_cl_")===0) continue;  // 이 앱 자체 키는 제외
-      let v; try{ v=JSON.parse(localStorage.getItem(k)); }catch(e){ continue; }
-      if(!v || typeof v!=="object") continue;
-      const m=extractFEMaster(v);
-      if(m.items.length || m.lines.length) return {ok:true, lines:m.lines, items:m.items, file:k, via:"local"};
+/* 생산계획 엑셀 직접 파싱 — 계획검토 시트의 라인/품명/품번/주야/일자별 수량을 그대로 가져옴 */
+function excelSerialToDateStr(v){
+  if(typeof v!=="number" || v<40000) return null;
+  const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+  // 엑셀 직렬값은 타임존 무관 → UTC 기준으로 읽어야 하루 안 밀림
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+}
+function parsePlanExcel(wb){
+  const sheetNames = wb.SheetNames || [];
+  const target = sheetNames.includes("계획검토") ? ["계획검토"] : sheetNames;
+  for(const sn of target){
+    const ws = wb.Sheets[sn]; if(!ws || !ws["!ref"]) continue;
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    const cell = (r,c)=>{ const x=ws[XLSX.utils.encode_cell({r,c})]; return x?x.v:undefined; };
+
+    // 1) 헤더 행 찾기: 처음 10행 안에서 "품번" 텍스트가 있는 행
+    let hr=-1, pnoCol=-1, nameCol=-1, lineCol=-1, shiftCol=-1;
+    for(let r=0; r<=Math.min(9,range.e.r) && hr<0; r++){
+      for(let c=0; c<=range.e.c; c++){
+        const v=String(cell(r,c)||"");
+        if(v.indexOf("품번")>=0){ hr=r; break; }
+      }
     }
-  }catch(e){}
-  return {ok:false};
+    if(hr>=0){
+      for(let c=0; c<=range.e.c; c++){
+        const v=String(cell(hr,c)||"");
+        if(pnoCol<0 && v.indexOf("품번")>=0) pnoCol=c;
+        else if(nameCol<0 && v.indexOf("품명")>=0) nameCol=c;
+        if(lineCol<0 && (v.indexOf("중분류")>=0 || v.indexOf("라인")>=0)) lineCol=c;
+        if(shiftCol<0 && (v.indexOf("구분2")>=0)) shiftCol=c;
+      }
+    }
+    // 2) 폴백: MFG Report와 동일한 고정 위치 (헤더 5행, 중분류 G열, 품명 H열, 품번 I열, 구분2 L열)
+    if(hr<0) hr=4;
+    if(lineCol<0) lineCol=6;
+    if(nameCol<0) nameCol=7;
+    if(pnoCol<0) pnoCol=8;
+    if(shiftCol<0){
+      // 데이터에서 '주간계획/야간계획' 값이 나오는 열 탐색
+      for(let c=0; c<=Math.min(20,range.e.c) && shiftCol<0; c++){
+        for(let r=hr+1; r<=Math.min(hr+40,range.e.r); r++){
+          const v=String(cell(r,c)||"").trim();
+          if(v==="주간계획"||v==="야간계획"){ shiftCol=c; break; }
+        }
+      }
+      if(shiftCol<0) shiftCol=11;
+    }
+    // 3) 날짜 열: 헤더 행에서 엑셀 직렬값(>40000)
+    const dateCols={};
+    for(let c=0; c<=range.e.c; c++){
+      const ds=excelSerialToDateStr(cell(hr,c));
+      if(ds) dateCols[c]=ds;
+    }
+    if(Object.keys(dateCols).length===0) continue;   // 이 시트엔 날짜 헤더 없음 → 다음 시트
+
+    // 4) 데이터 행 수집
+    const rows=[];
+    for(let r=hr+1; r<=range.e.r; r++){
+      const g=String(cell(r,shiftCol)||"").trim();
+      let shift=null;
+      if(g.indexOf("주간")>=0) shift="주간";
+      else if(g.indexOf("야간")>=0) shift="야간";
+      else continue;
+      const pno=String(cell(r,pnoCol)||"").trim();
+      if(!pno) continue;
+      const name=String(cell(r,nameCol)||"").trim();
+      let line=lineCol>=0 ? String(cell(r,lineCol)||"").trim() : "";
+      if(line==="-") line="";
+      Object.entries(dateCols).forEach(([c,date])=>{
+        const q=cell(r,parseInt(c));
+        if(typeof q==="number" && q>0){ const qi=Math.round(q); if(qi>0) rows.push({date, shift, line, name, pno, qty:qi}); }
+      });
+    }
+    if(rows.length) return {ok:true, rows, sheet:sn};
+  }
+  return {ok:false, err:"계획 시트를 해석하지 못했습니다 (날짜 헤더/품번 열을 찾지 못함)"};
 }
 
 function defaultSettings(){
   return {
     lines: [...FE_SEED.lines],
     items: FE_SEED.items.map(it=>({...it, partNos:[...it.partNos]})),
-    masterSource: "snapshot",   // snapshot | production | manual | none
+    masterSource: "snapshot",   // snapshot(초기 기본값) | plan(생산계획 엑셀 기준)
     masterLoadedAt: FE_SEED.savedAt || "",
     writers: ["황숙향"],
     reviewers: [],
@@ -243,11 +272,26 @@ function defaultSettings(){
     defaultTime: "08:20 ~ 08:30",
   };
 }
-// 캐시(localStorage/Drive/JSON)에서 복원할 때, 품목 마스터는 항상 최신 스냅샷에서 시작하고
-// 라이브 연동이 되면 그때 덮어쓴다. (옛 캐시의 라인/품명이 되살아나는 것 방지)
+/* 생산계획 행에서 품목 마스터(라인/품명/품번) 생성 — 단일 소스 */
+function masterFromPlanRows(rows){
+  const lines=[...new Set((rows||[]).map(r=>r.line).filter(Boolean))];
+  const m=new Map();
+  (rows||[]).forEach(r=>{
+    if(!r.name) return;
+    if(!m.has(r.name)) m.set(r.name,{item:r.name, lineName:r.line||"", partNos:new Set()});
+    const e=m.get(r.name);
+    if(!e.lineName && r.line) e.lineName=r.line;
+    if(r.pno) e.partNos.add(r.pno);
+  });
+  return {lines, items:[...m.values()].map(e=>({item:e.item, lineName:e.lineName, partNos:[...e.partNos]}))};
+}
+
+// 캐시(localStorage/Drive/JSON) 복원: 생산계획 엑셀에서 만든 마스터는 유지, 그 외에는 초기 스냅샷으로
 function mergeSettings(cached){
   const base = defaultSettings();
   if(!cached || typeof cached!=="object") return base;
+  const keepPlanMaster = cached.masterSource==="plan" && Array.isArray(cached.items) && cached.items.length>0;
+  if(keepPlanMaster) return { ...base, ...cached };
   return { ...base, ...cached, lines: base.lines, items: base.items, masterSource: base.masterSource, masterLoadedAt: base.masterLoadedAt };
 }
 
@@ -255,7 +299,7 @@ function mergeSettings(cached){
    유틸
    ============================================================ */
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
-const todayStr = () => new Date().toISOString().slice(0,10);
+const todayStr = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
 const nowStr = () => new Date().toISOString();
 function fmtDate(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function fmtDateTime(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${fmtDate(s)} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }
@@ -317,7 +361,7 @@ function newRecord(type, settings){
   TPL[type].items.forEach(it=>{ items[it.no]={r:"",rm:"",q:""}; });
   const r = { ...base,
     line:"", name:"", part:"", model:"", shiftLeader:"",
-    lot:"", prodDate: todayStr(),
+    lot:"", prodDate: todayStr(), shift:"",
     items,
   };
   if(type==="dock"){
@@ -376,15 +420,24 @@ function Field({label, children, req}){
 const inputCls = "w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-[15px] focus:border-slate-500 focus:ring-2 focus:ring-slate-200 outline-none";
 
 function MasterPicker({lines, items, value, onChange}){
-  const sortedLines = useMemo(()=>[...(lines||[])].sort((a,b)=>a.localeCompare(b)), [lines]);
+  // 현재 값이 마스터에 없어도(생산계획에서 채워진 품번 등) 옵션에 포함시켜 빈칸으로 보이지 않게 함
+  const sortedLines = useMemo(()=>{
+    const base=[...(lines||[])];
+    if(value.line && !base.includes(value.line)) base.push(value.line);
+    return base.sort((a,b)=>a.localeCompare(b));
+  }, [lines, value.line]);
   const names = useMemo(()=>{
     const f = value.line ? (items||[]).filter(it=>(it.lineName||"")===value.line) : (items||[]);
-    return f.map(it=>it.item).sort((a,b)=>a.localeCompare(b));
-  }, [items, value.line]);
+    const arr = f.map(it=>it.item);
+    if(value.name && !arr.includes(value.name)) arr.push(value.name);
+    return arr.sort((a,b)=>a.localeCompare(b));
+  }, [items, value.line, value.name]);
   const parts = useMemo(()=>{
     const it = (items||[]).find(x=>x.item===value.name);
-    return it ? it.partNos : [];
-  }, [items, value.name]);
+    const arr = it ? [...it.partNos] : [];
+    if(value.part && !arr.includes(value.part)) arr.push(value.part);
+    return arr;
+  }, [items, value.name, value.part]);
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -447,45 +500,9 @@ function App(){
   const [editing, setEditing] = useState(null);    // record being edited (object)
   const [viewing, setViewing] = useState(null);    // record being viewed/printed (object)
   const [sync, setSync] = useState({state: GAS_URL?"idle":"local", msg:""});
-  const [masterSync, setMasterSync] = useState({state: PROD_GAS_URL?"idle":"off", msg:"", file:""});
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const loadedRef = useRef(false);
   const fileRef = useRef(null);
-
-  // 생산관리시스템(FE) 설정에서 라인/품명/품번 불러오기
-  const loadProdMaster = useCallback(async()=>{
-    setMasterSync({state:"loading", msg:"생산관리시스템 불러오는 중…", file:""});
-    let r = PROD_GAS_URL ? await fetchProdFEMaster() : {ok:false};
-    if(!(r.ok && (r.items.length || r.lines.length))){
-      const local = scanLocalForFEMaster();      // 같은 사이트 localStorage 탐색
-      if(local.ok) r = local;
-    }
-    if(r.ok && (r.items.length || r.lines.length)){
-      setSettings(prev=>({
-        ...prev,
-        lines: r.lines.length ? r.lines : prev.lines,
-        items: r.items.length ? r.items : prev.items,
-        masterSource: "production",
-        masterLoadedAt: nowStr(),
-      }));
-      setMasterSync({state:"ok", msg:`품명 ${r.items.length} · 라인 ${r.lines.length}${r.via==="local"?" (로컬)":""}`, file:r.file||""});
-    } else {
-      // 라이브 연동 실패 — 내장 스냅샷 그대로 사용
-      setMasterSync({state:"snapshot", msg:"최근 동기화 데이터 사용 중", file:""});
-    }
-  }, []);
-
-  // 수동 import (file:// 등 fetch 불가 시) — fe-backup-*.json 직접 읽기
-  const importProdFile = useCallback((file)=>{
-    const rd=new FileReader();
-    rd.onload=()=>{ try{
-      const m = extractFEMaster(JSON.parse(rd.result));
-      if(!m.items.length && !m.lines.length){ alert("이 파일에서 라인/품명/품번을 찾지 못했습니다."); return; }
-      setSettings(prev=>({...prev, lines:m.lines.length?m.lines:prev.lines, items:m.items.length?m.items:prev.items, masterSource:"manual", masterLoadedAt:nowStr()}));
-      setMasterSync({state:"ok", msg:`품명 ${m.items.length} · 라인 ${m.lines.length} (파일)`, file:file.name});
-    }catch(e){ alert("파일을 읽지 못했습니다."); } };
-    rd.readAsText(file);
-  }, []);
 
   // 결재 요청 메일 발송 (여러 건을 한 통으로). 등록 이메일/GAS 없으면 건너뜀.
   const sendApprovalMail = useCallback((to, toName, recs)=>{
@@ -495,27 +512,82 @@ function App(){
       body: JSON.stringify({ action:"mail", to, subject:mail.subject, html:mail.html, text:mail.text }) }).catch(()=>{});
   }, []);
 
+  // 생산계획 (Production 보고 자동 연동 + 직접 업로드 폴백. 품목 마스터도 여기서 생성)
+  const [planData, setPlanData] = useState(()=> loadLocal(LS_PLAN, {rows:[], file:"", uploadedAt:"", source:""}));
+  const [reportSync, setReportSync] = useState({state:"idle", msg:""});
+  const planRef = useRef(planData);
+  useEffect(()=>{ planRef.current = planData; }, [planData]);
+
+  const applyPlanRows = useCallback((rows, file, uploadedAt, source)=>{
+    setPlanData({rows, file:file||"", uploadedAt:uploadedAt||nowStr(), source:source||""});
+    // 품목 마스터(라인/품명/품번)도 같은 데이터에서 생성 → 계획·작성 드롭다운이 항상 일치
+    const m = masterFromPlanRows(rows);
+    setSettings(prev=>({...prev, lines:m.lines, items:m.items, masterSource:"plan", masterLoadedAt:nowStr()}));
+    return m;
+  }, []);
+
+  // Production 보고 백업에서 자동으로 가져오기
+  const loadReportPlan = useCallback(async(manual)=>{
+    setReportSync({state:"loading", msg:"Report에서 가져오는 중…"});
+    const r = await fetchReportPlanRaw();
+    if(r.ok){
+      const remoteAt = r.raw.uploadedAt||"";
+      const cur = planRef.current||{};
+      const shouldApply = manual || !(cur.rows&&cur.rows.length) || (remoteAt && remoteAt > (cur.uploadedAt||""));
+      if(shouldApply){
+        const m = applyPlanRows(r.raw.rows, r.raw.file||"(Report)", remoteAt, "report");
+        setReportSync({state:"ok", msg:`Report 연동됨 · 라인 ${m.lines.length} · 품명 ${m.items.length}`});
+      } else {
+        setReportSync({state:"ok", msg:"로컬 계획이 최신"});
+      }
+    } else {
+      setReportSync({state:"err", msg:r.err||"가져오기 실패"});
+    }
+  }, [applyPlanRows]);
+
+  const uploadPlanFile = useCallback((file)=>{
+    const rd=new FileReader();
+    rd.onload=()=>{ try{
+      const wb = XLSX.read(rd.result, {type:"array"});
+      const r = parsePlanExcel(wb);
+      if(!r.ok){ alert(r.err||"계획 파일을 해석하지 못했습니다."); return; }
+      const m = applyPlanRows(r.rows, file.name, nowStr(), "upload");
+      alert(`생산계획 ${r.rows.length}건 불러옴 (${r.sheet} 시트)\n품목 마스터 갱신: 라인 ${m.lines.length} · 품명 ${m.items.length}`);
+    }catch(e){ alert("파일을 읽지 못했습니다: "+e); } };
+    rd.readAsArrayBuffer(file);
+  }, [applyPlanRows]);
+  // 생산계획에서 점검표 바로 작성 (품번/품명/라인/날짜 미리 채움)
+  const createFromPlan = useCallback((type, p)=>{
+    const rec = newRecord(type, settings);
+    rec.line = p.line||""; rec.name = p.name||""; rec.part = p.pno||""; rec.model = p.line||rec.model||"";
+    rec.shift = p.shift||"";
+    if(type==="dock") rec.checkDate = p.date; else rec.prodDate = p.date;
+    setEditing(rec);
+  }, [settings]);
+
   // 메일 링크(#inbox)로 들어오면 결재함 탭 자동 열기
   useEffect(()=>{ if((location.hash||"").toLowerCase().indexOf("inbox")>=0) setTab("inbox"); }, []);
 
   // 초기 Drive 동기화 (Drive 우선)
   useEffect(()=>{
     (async()=>{
-      const idbR = await idbGet(LS_RECORDS); const idbS = await idbGet(LS_SETTINGS);
+      const idbR = await idbGet(LS_RECORDS); const idbS = await idbGet(LS_SETTINGS); const idbP = await idbGet(LS_PLAN);
       if(Array.isArray(idbR) && idbR.length && records.length===0) setRecords(idbR);
       if(idbS) setSettings(mergeSettings(idbS));
+      if(idbP && Array.isArray(idbP.rows) && idbP.rows.length) setPlanData(p=> (p.rows&&p.rows.length)?p:idbP);
       if(GAS_URL){
         setSync({state:"loading", msg:"동기화 중…"});
         const r = await driveLoad();
         if(r.ok && r.data && Array.isArray(r.data.records)){
           setRecords(r.data.records);
           if(r.data.settings) setSettings(mergeSettings(r.data.settings));
+          if(r.data.planData && Array.isArray(r.data.planData.rows)) setPlanData(r.data.planData);
           setSync({state:"ok", msg:"동기화됨"});
         } else setSync({state: r.off?"local":"err", msg: r.off?"":"동기화 실패"});
       }
       loadedRef.current = true;
-      // 생산관리시스템 FE 설정에서 라인/품명/품번 자동 로드 (로컬/Drive 복원 이후에 덮어쓰기)
-      loadProdMaster();
+      // Production 보고에서 생산계획 원본 자동 가져오기 (로컬/Drive 복원 후, 더 최신일 때만 교체)
+      loadReportPlan();
     })();
   // eslint-disable-next-line
   }, []);
@@ -523,22 +595,29 @@ function App(){
   // 저장 (local + idb 즉시, Drive 디바운스)
   useEffect(()=>{ saveLocal(LS_RECORDS, records); idbSet(LS_RECORDS, records); }, [records]);
   useEffect(()=>{ saveLocal(LS_SETTINGS, settings); idbSet(LS_SETTINGS, settings); }, [settings]);
+  useEffect(()=>{ saveLocal(LS_PLAN, planData); idbSet(LS_PLAN, planData); }, [planData]);
   useEffect(()=>{
     if(!loadedRef.current || !GAS_URL) return;
     const h = setTimeout(async()=>{
       setSync(s=>({...s, state:"saving"}));
-      const r = await driveSave({records, settings, ver:APP_VERSION});
+      const r = await driveSave({records, settings, planData, ver:APP_VERSION});
       setSync({state: r.ok?"ok":"err", msg: r.ok?"저장됨":"저장 실패"});
     }, 1200);
     return ()=>clearTimeout(h);
-  }, [records, settings]);
+  }, [records, settings, planData]);
 
   // 액션
   const upsert = useCallback((rec)=>{
     rec.updatedAt = nowStr();
     setRecords(prev=>{ const i=prev.findIndex(r=>r.id===rec.id); if(i<0) return [rec,...prev]; const c=[...prev]; c[i]=rec; return c; });
   }, []);
-  const removeRec = useCallback((id)=>{ if(!confirm("이 문서를 삭제할까요?")) return; setRecords(prev=>prev.filter(r=>r.id!==id)); }, []);
+  const removeRec = useCallback((id)=>{
+    const pw = prompt("문서 삭제는 관리자만 가능합니다.\n관리자 비밀번호를 입력하세요.");
+    if(pw===null) return;
+    if(hashPw(pw)!==settings.adminPw){ alert("관리자 비밀번호가 일치하지 않습니다."); return; }
+    if(!confirm("이 문서를 삭제할까요? (되돌릴 수 없습니다)")) return;
+    setRecords(prev=>prev.filter(r=>r.id!==id));
+  }, [settings.adminPw]);
 
   function approveMany(targets, opts){
     opts = opts||{};
@@ -575,7 +654,7 @@ function App(){
   }, []);
 
   function exportJson(){
-    const blob = new Blob([JSON.stringify({records,settings,ver:APP_VERSION},null,2)], {type:"application/json"});
+    const blob = new Blob([JSON.stringify({records,settings,planData,ver:APP_VERSION},null,2)], {type:"application/json"});
     const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
     a.download=`점검조회_백업_${todayStr()}.json`; a.click();
   }
@@ -584,6 +663,7 @@ function App(){
     rd.onload=()=>{ try{ const j=JSON.parse(rd.result);
       if(Array.isArray(j.records)) setRecords(j.records);
       if(j.settings) setSettings(mergeSettings(j.settings));
+      if(j.planData && Array.isArray(j.planData.rows)) setPlanData(j.planData);
       alert("불러오기 완료");
     }catch(e){ alert("파일을 읽지 못했습니다."); } };
     rd.readAsText(file);
@@ -627,7 +707,7 @@ function App(){
         </div>
         {/* 탭 */}
         <nav className="max-w-5xl mx-auto px-2 flex gap-1 overflow-x-auto">
-          {[["list","목록"],["new","작성"],["inbox","결재함"],["settings","설정"]].map(([k,t])=>(
+          {[["list","목록"],["plan","생산계획"],["new","작성"],["inbox","결재함"],["settings","설정"]].map(([k,t])=>(
             <button key={k} onClick={()=>setTab(k)}
               className={`px-4 py-2.5 text-[14px] font-bold whitespace-nowrap border-b-2 ${tab===k?"border-slate-900 text-slate-900":"border-transparent text-slate-400"}`}>
               {t}{k==="inbox" && pendingCount>0 && <span className="ml-1.5 text-[11px] bg-rose-500 text-white rounded-full px-1.5 py-0.5">{pendingCount}</span>}
@@ -638,6 +718,10 @@ function App(){
 
       <main className="max-w-5xl mx-auto px-4 pt-5">
         {tab==="list" && <ListView records={records} onOpen={setViewing} onEdit={setEditing} onDelete={removeRec} />}
+        {tab==="plan" && <PlanView records={records} settings={settings}
+          planData={planData} onUploadPlan={uploadPlanFile}
+          reportSync={reportSync} onReloadReport={()=>loadReportPlan(true)}
+          onCreate={createFromPlan} onOpen={setViewing} onEdit={setEditing} />}
         {tab==="new" && <NewView settings={settings} onPick={(type)=>{
           let rec = newRecord(type, settings);
           if(type==="briefing"){
@@ -650,8 +734,7 @@ function App(){
         {tab==="inbox" && <InboxView records={records} onApprove={approveMany} onOpen={setViewing}
           passwords={settings.passwords||{}} onSetPassword={setPwForPerson} />}
         {tab==="settings" && (adminUnlocked
-          ? <SettingsView settings={settings} setSettings={setSettings}
-              masterSync={masterSync} onReloadMaster={loadProdMaster} onImportMaster={importProdFile} />
+          ? <SettingsView settings={settings} setSettings={setSettings} planData={planData} />
           : <AdminGate adminPw={settings.adminPw} onUnlock={()=>setAdminUnlocked(true)} onCancel={()=>setTab("list")} />
         )}
       </main>
@@ -794,6 +877,149 @@ function ListView({records, onOpen, onEdit, onDelete}){
 }
 
 /* ============================================================
+   생산계획 (MFG Report 백업 연동) — 오늘 생산 품목별 점검표 현황/작성
+   ============================================================ */
+function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onCreate, onOpen, onEdit}){
+  const [date, setDate] = useState(todayStr());
+  const fileRef = useRef(null);
+  const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
+
+  // 선택 날짜 행 (엑셀 그대로) — 주/야·품번 단위로 합산
+  const allRows = useMemo(()=>{
+    if(!hasPlan) return [];
+    const m=new Map();
+    planData.rows.forEach(row=>{
+      if(row.date!==date) return;
+      const k=row.shift+"|"+row.pno;
+      if(!m.has(k)) m.set(k,{shift:row.shift, pno:row.pno, name:row.name||"", line:row.line||"", qty:0});
+      const e=m.get(k); e.qty+=(row.qty||0);
+      if(!e.name && row.name) e.name=row.name;
+      if(!e.line && row.line) e.line=row.line;
+    });
+    return [...m.values()];
+  }, [planData, date, hasPlan]);
+
+  const bySect = useMemo(()=>{
+    const sect = {"주간":[], "야간":[]};
+    allRows.forEach(r=>{ (sect[r.shift]||(sect[r.shift]=[])).push(r); });
+    Object.values(sect).forEach(a=>a.sort((x,y)=> (x.line||"").localeCompare(y.line||"","ko") || (x.name||"").localeCompare(y.name||"","ko") || x.pno.localeCompare(y.pno)));
+    return sect;
+  }, [allRows]);
+  const total = allRows.length;
+
+  // 매칭: 품번(정규화) + 날짜 + 주야 — 마스터도 같은 엑셀에서 만들어지므로 이걸로 충분
+  const recOf = (type, row)=> records.find(r=> r.type===type && samePno(r.part, row.pno) &&
+    fmtDate(type==="dock" ? (r.checkDate||r.prodDate||r.createdAt) : (r.prodDate||r.createdAt)) === date &&
+    (!r.shift || r.shift===row.shift));
+
+  const CL_TYPES = [["first","초도양산"],["startup","Start Up"],["dock","Dock Audit"]];
+  const missing = useMemo(()=> allRows.reduce((s,row)=> s + CL_TYPES.filter(([t])=>!recOf(t,row)).length, 0), [allRows, records, date]);
+
+  const StatusBtn = ({type, row})=>{
+    const rec = recOf(type, row);
+    if(!rec) return (
+      <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date, shift:row.shift})}
+        className="w-full px-2 py-1.5 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 text-[12px] font-bold hover:border-slate-500 hover:text-slate-600">+ 작성</button>
+    );
+    if(rec.status==="draft") return (
+      <button onClick={()=>onEdit(rec)} className="w-full px-2 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[12px] font-bold border border-amber-200">임시저장 →</button>
+    );
+    if(rec.status==="pending") return (
+      <button onClick={()=>onOpen(rec)} className="w-full px-2 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-[12px] font-bold border border-sky-200">결재중</button>
+    );
+    return (
+      <button onClick={()=>onOpen(rec)} className="w-full px-2 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-[12px] font-bold border border-emerald-200">✓ 완료</button>
+    );
+  };
+
+  const SectTable = ({title, rows, accent})=>(
+    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+      <div className="px-3 py-2 font-extrabold text-[14px] text-white flex items-center gap-2" style={{background:accent}}>
+        {title} <span className="text-[12px] font-semibold opacity-80">{rows.length}품목</span>
+      </div>
+      {rows.length===0 ? <div className="text-center text-slate-300 py-6 text-[13px]">계획 없음</div> : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px]" style={{minWidth:"760px"}}>
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-[12px]">
+                <th className="text-left px-3 py-1.5 font-bold w-[120px]">라인</th>
+                <th className="text-left px-3 py-1.5 font-bold">품명</th>
+                <th className="text-left px-3 py-1.5 font-bold w-[110px]">품번</th>
+                <th className="text-right px-3 py-1.5 font-bold w-[80px]">수량</th>
+                <th className="text-center px-2 py-1.5 font-bold w-[106px]">초도양산</th>
+                <th className="text-center px-2 py-1.5 font-bold w-[106px]">Start Up</th>
+                <th className="text-center px-2 py-1.5 font-bold w-[106px]">Dock Audit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row=>(
+                <tr key={row.shift+row.pno} className="border-b border-slate-100">
+                  <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.line||"-"}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-800">{row.name||"-"}</td>
+                  <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.pno}</td>
+                  <td className="px-3 py-2 text-right text-slate-600">{row.qty?row.qty.toLocaleString():"-"}</td>
+                  {CL_TYPES.map(([t])=> <td key={t} className="px-2 py-1.5"><StatusBtn type={t} row={row}/></td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
+  const rs = reportSync||{state:"idle"};
+  const srcLabel = !hasPlan ? "" : (planData.source==="report" ? "Production 보고 연동" : "직접 업로드");
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <input type="date" className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-[13px] font-semibold" value={date} onChange={e=>setDate(e.target.value)}/>
+        <button onClick={()=>onReloadReport&&onReloadReport()} disabled={rs.state==="loading"}
+          className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[12px] font-bold disabled:opacity-50">
+          {rs.state==="loading"?"가져오는 중…":"🔄 보고에서 가져오기"}
+        </button>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden"
+          onChange={e=>{ const f=e.target.files&&e.target.files[0]; if(f&&onUploadPlan) onUploadPlan(f); e.target.value=""; }}/>
+        <button onClick={()=>fileRef.current&&fileRef.current.click()}
+          className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-600 text-[12px] font-bold">📂 직접 올리기</button>
+        {total>0 && (
+          missing>0
+            ? <span className="text-[12px] font-bold text-rose-600 bg-rose-50 px-2.5 py-1.5 rounded-lg">미작성 {missing}건</span>
+            : <span className="text-[12px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1.5 rounded-lg">✓ 전부 작성됨</span>
+        )}
+        <span className="ml-auto text-[11px] text-slate-400">
+          {hasPlan?`${srcLabel} · ${planData.file} (${fmtDate(planData.uploadedAt)})`:""}
+          {rs.state==="err" && <span className="text-rose-400"> · {rs.msg}</span>}
+        </span>
+      </div>
+
+      {!hasPlan && (
+        <div className="text-[13px] text-slate-500 bg-white border border-slate-200 rounded-2xl p-5 text-center leading-relaxed">
+          아직 생산계획이 없습니다.<br/>
+          <b>Production 보고에 FE 생산계획을 올리면</b> 이 탭이 자동으로 가져옵니다 (앱을 열 때마다 최신 확인).<br/>
+          {rs.state==="err" && <span className="text-rose-500 text-[12px]">보고에서 가져오기 실패: {rs.msg}<br/></span>}
+          급할 땐 <b>📂 직접 올리기</b>로 같은 엑셀을 올려도 됩니다.
+        </div>
+      )}
+
+      {hasPlan && total===0 && (
+        <div className="text-center text-slate-400 py-14 text-[14px]">{fmtDate(date)} 기준 생산계획이 없습니다.</div>
+      )}
+
+      {total>0 && (
+        <>
+          <SectTable title="🌞 주간" rows={bySect["주간"]||[]} accent="#0369a1"/>
+          <SectTable title="🌙 야간" rows={bySect["야간"]||[]} accent="#334155"/>
+        </>
+      )}
+
+      <p className="text-[11px] text-slate-400">※ Production 보고에 올린 FE 생산계획 원본을 그대로 가져와 표시하며, 작성 드롭다운(품목 목록)도 같은 데이터로 자동 생성됩니다 — 따로 관리할 게 없습니다.</p>
+    </div>
+  );
+}
+
+/* ============================================================
    작성 선택
    ============================================================ */
 function NewView({onPick}){
@@ -918,7 +1144,7 @@ function ChecklistFields({r, set, setR, settings}){
         <div className="text-[12px] text-slate-400">Doc No: {tpl.doc}</div>
         {(!settings.items || settings.items.length===0) && (
           <div className="text-[12px] text-amber-700 bg-amber-50 rounded-lg p-2.5">
-            생산관리시스템에서 품목을 아직 불러오지 못했습니다. 설정 → <b>품목(생산관리시스템)</b>에서 불러온 뒤 작성하세요.
+            품목 목록이 비어 있습니다. <b>생산계획 탭에서 계획 엑셀을 올리면</b> 라인·품명·품번이 자동으로 채워집니다.
           </div>
         )}
         <MasterPicker lines={settings.lines} items={settings.items} value={{line:r.line,name:r.name,part:r.part}}
@@ -926,6 +1152,11 @@ function ChecklistFields({r, set, setR, settings}){
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <Field label="생산 기종"><input className={inputCls} value={r.model} onChange={e=>set({model:e.target.value})}/></Field>
           <Field label="Shift Leader"><PeopleSelect list={settings.writers} value={r.shiftLeader} onChange={v=>set({shiftLeader:v})}/></Field>
+          <Field label="주 / 야">
+            <select className={inputCls} value={r.shift||""} onChange={e=>set({shift:e.target.value})}>
+              <option value="">선택</option><option value="주간">주간</option><option value="야간">야간</option>
+            </select>
+          </Field>
           {r.type==="dock" ? <>
             <Field label="Batch No."><input className={inputCls} value={r.batchNo} onChange={e=>set({batchNo:e.target.value})}/></Field>
             <Field label="검사일"><input type="date" className={inputCls} value={r.checkDate} onChange={e=>set({checkDate:e.target.value})}/></Field>
@@ -1063,6 +1294,10 @@ function BriefingFields({r, set, setR, settings, onLoadRecent, hasRecent, recent
    결재함
    ============================================================ */
 function recTitle(r){ return r.type==="briefing" ? `조회일지 · ${fmtDate(r.date)} · ${r.place}` : `${TPL[r.type].title} · ${r.name||"-"}`; }
+
+// 품번 비교용 정규화: 대소문자/공백/하이픈/언더스코어 차이 무시 (20904F-CKD ≡ 20904f ckd)
+function normPno(s){ return String(s||"").toUpperCase().replace(/[\s\-_./]/g,""); }
+function samePno(a,b){ const x=normPno(a), y=normPno(b); return !!x && x===y; }
 
 // 결재 요청 메일 (여러 건을 한 통으로). recs: 같은 결재자에게 갈 문서 배열
 function buildApprovalListMail(recs, toName){
@@ -1307,25 +1542,24 @@ function AdminGate({adminPw, onUnlock, onCancel}){
   );
 }
 
-function SettingsView({settings, setSettings, masterSync, onReloadMaster, onImportMaster}){
+function SettingsView({settings, setSettings, planData}){
   const [sub, setSub] = useState("master");
-  const tabs = [["master","품목 (생산관리시스템)"],["people","인원/결재"],["briefing","조회일지 기본값"]];
+  const tabs = [["master","품목 (생산계획 기준)"],["people","인원/결재"],["briefing","조회일지 기본값"]];
   return (
     <div>
       <div className="flex gap-1 mb-4 border-b border-slate-200">
         {tabs.map(([k,t])=> <button key={k} onClick={()=>setSub(k)}
           className={`px-3 py-2 text-[13px] font-bold border-b-2 ${sub===k?"border-slate-900 text-slate-900":"border-transparent text-slate-400"}`}>{t}</button>)}
       </div>
-      {sub==="master" && <MasterSettings settings={settings} masterSync={masterSync} onReloadMaster={onReloadMaster} onImportMaster={onImportMaster}/>}
+      {sub==="master" && <MasterSettings settings={settings} planData={planData}/>}
       {sub==="people" && <PeopleSettings settings={settings} setSettings={setSettings}/>}
       {sub==="briefing" && <BriefingSettings settings={settings} setSettings={setSettings}/>}
     </div>
   );
 }
 
-function MasterSettings({settings, masterSync, onReloadMaster, onImportMaster}){
+function MasterSettings({settings, planData}){
   const [q,setQ]=useState("");
-  const fileRef = useRef(null);
   const items = settings.items||[];
   const lines = settings.lines||[];
   const totalParts = useMemo(()=>items.reduce((s,it)=>s+(it.partNos?it.partNos.length:0),0), [items]);
@@ -1335,42 +1569,20 @@ function MasterSettings({settings, masterSync, onReloadMaster, onImportMaster}){
     return items.filter(it=> it.item.toLowerCase().includes(s) || (it.lineName||"").toLowerCase().includes(s) || (it.partNos||[]).some(p=>p.toLowerCase().includes(s)));
   }, [items,q]);
 
-  const srcLabel = { production:"생산관리시스템 연동됨", snapshot:"동기화 스냅샷", manual:"파일에서 불러옴", none:"불러온 데이터 없음" }[settings.masterSource||"none"];
-  const ss = masterSync||{state:"idle"};
-  const dot = { ok:"#059669", snapshot:"#0284c7", loading:"#d97706", err:"#e11d48", off:"#94a3b8", idle:"#94a3b8" }[ss.state]||"#94a3b8";
+  const fromPlan = (settings.masterSource||"")==="plan";
 
   return (
     <div className="space-y-3">
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
-            <div className="font-bold text-slate-700">생산관리시스템 품목 연동</div>
-            <p className="text-[12px] text-slate-400 mt-0.5">점검표의 <b>라인 · 품명 · 생산품번</b>은 FE 생산관리시스템 설정에서 자동으로 불러옵니다.</p>
-          </div>
-          <button onClick={()=>onReloadMaster&&onReloadMaster()} disabled={ss.state==="loading"}
-            className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-bold disabled:opacity-50">
-            {ss.state==="loading"?"불러오는 중…":"🔄 다시 불러오기"}
-          </button>
-        </div>
+        <div className="font-bold text-slate-700">품목 기준: 생산계획 엑셀</div>
+        <p className="text-[12px] text-slate-400 mt-0.5">점검표의 <b>라인 · 품명 · 생산품번</b>은 <b>생산계획 탭에서 올린 엑셀</b>에서 자동 생성됩니다. 새 계획을 올리면 즉시 갱신돼요.</p>
         <div className="mt-3 flex items-center gap-2 text-[12px]">
-          <span className="w-2 h-2 rounded-full" style={{background:dot}}/>
-          <span className="font-semibold text-slate-600">{srcLabel}</span>
-          {ss.msg && <span className="text-slate-400">· {ss.msg}</span>}
+          <span className="w-2 h-2 rounded-full" style={{background: fromPlan?"#059669":"#94a3b8"}}/>
+          <span className="font-semibold text-slate-600">{fromPlan?"생산계획 엑셀 기준":"초기 기본값 (계획 업로드 전)"}</span>
+          {planData&&planData.file && <span className="text-slate-400">· {planData.file}</span>}
           {settings.masterLoadedAt && <span className="text-slate-300">· {fmtDateTime(settings.masterLoadedAt)}</span>}
         </div>
-        <div className="mt-2 text-[12px] text-slate-500">라인 <b>{lines.length}</b> · 품명 <b>{items.length}</b> · 품번 <b>{totalParts}</b>{ss.file?<span className="text-slate-300"> · {ss.file}</span>:null}</div>
-        {ss.state==="snapshot" && (
-          <div className="mt-3 text-[12px] text-sky-800 bg-sky-50 rounded-lg p-3 leading-relaxed">
-            라이브 연결은 안 됐지만, 마지막으로 동기화된 생산관리시스템 데이터로 표시 중입니다. 생산관리시스템과 같은 사이트(GitHub Pages)에서 열면 최신으로 자동 갱신돼요. 미리보기 화면에서는 외부 연결이 막혀 스냅샷이 유지됩니다.
-          </div>
-        )}
-        {(ss.state==="err" || (settings.masterSource||"none")==="none") && (
-          <div className="mt-3 text-[12px] text-rose-700 bg-rose-50 rounded-lg p-3 leading-relaxed space-y-1">
-            <div className="font-bold">생산관리시스템 데이터를 불러오지 못했습니다.</div>
-            <div>① 이 앱을 <b>생산관리시스템과 같은 사이트</b>(GitHub Pages)에 올려서 열면 자동으로 불러옵니다.</div>
-            <div>② 또는 아래에서 생산관리시스템이 저장한 <b>fe-backup-*.json</b>을 직접 선택하세요.</div>
-          </div>
-        )}
+        <div className="mt-2 text-[12px] text-slate-500">라인 <b>{lines.length}</b> · 품명 <b>{items.length}</b> · 품번 <b>{totalParts}</b></div>
         {lines.length>0 && (
           <div className="mt-3">
             <div className="text-[11px] font-bold text-slate-400 mb-1">라인</div>
@@ -1379,23 +1591,15 @@ function MasterSettings({settings, masterSync, onReloadMaster, onImportMaster}){
             </div>
           </div>
         )}
-        <div className="mt-3 flex items-center gap-2">
-          <input ref={fileRef} type="file" accept=".json,application/json" className="hidden"
-            onChange={e=>{ const f=e.target.files&&e.target.files[0]; if(f&&onImportMaster) onImportMaster(f); e.target.value=""; }}/>
-          <button onClick={()=>fileRef.current&&fileRef.current.click()}
-            className="text-[12px] px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 font-semibold hover:bg-slate-50">
-            📂 파일에서 불러오기 (fe-backup-*.json)
-          </button>
-        </div>
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between mb-2">
-          <div className="font-bold text-slate-700 text-[14px]">불러온 품목</div>
-          <input className="w-48 px-3 py-1.5 rounded-lg border border-slate-300 text-[13px]" placeholder="품명/품번 검색" value={q} onChange={e=>setQ(e.target.value)}/>
+          <div className="font-bold text-slate-700 text-[14px]">품목 목록</div>
+          <input className="w-48 px-3 py-1.5 rounded-lg border border-slate-300 text-[13px]" placeholder="라인/품명/품번 검색" value={q} onChange={e=>setQ(e.target.value)}/>
         </div>
         {items.length===0 ? (
-          <p className="text-[13px] text-slate-400 py-6 text-center">불러온 품목이 없습니다. 위에서 다시 불러오기를 눌러주세요.</p>
+          <p className="text-[13px] text-slate-400 py-6 text-center">품목이 없습니다. 생산계획 탭에서 엑셀을 올려주세요.</p>
         ) : (
           <div className="max-h-[50vh] overflow-auto border border-slate-100 rounded-lg">
             <table className="w-full text-[12px]">
@@ -1419,29 +1623,7 @@ function MasterSettings({settings, masterSync, onReloadMaster, onImportMaster}){
             </table>
           </div>
         )}
-        <p className="text-[11px] text-slate-400 mt-2">※ 품목은 생산관리시스템에서 관리합니다. 여기서는 수정하지 않고 그대로 불러옵니다.</p>
-      </div>
-    </div>
-  );
-}
-
-function ListEditor({title, hint, items, onChange}){
-  const [v,setV]=useState("");
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="font-bold text-slate-700">{title}</div>
-      {hint && <p className="text-[12px] text-slate-400 mt-0.5 mb-2">{hint}</p>}
-      <div className="flex flex-wrap gap-2 mb-3 mt-2">
-        {items.map((it,i)=>(
-          <span key={i} className="inline-flex items-center gap-1 bg-slate-100 rounded-full pl-3 pr-1 py-1 text-[13px]">
-            {it}<button className="w-5 h-5 rounded-full hover:bg-slate-200 text-slate-400" onClick={()=>onChange(items.filter((_,x)=>x!==i))}>✕</button>
-          </span>
-        ))}
-        {items.length===0 && <span className="text-[12px] text-slate-300">등록된 항목 없음</span>}
-      </div>
-      <div className="flex gap-2">
-        <input className="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-[13px]" placeholder="입력 후 추가" value={v} onChange={e=>setV(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&v.trim()){ onChange(uniq([...items,v.trim()])); setV(""); } }}/>
-        <button className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-bold" onClick={()=>{ if(v.trim()){ onChange(uniq([...items,v.trim()])); setV(""); } }}>추가</button>
+        <p className="text-[11px] text-slate-400 mt-2">※ 여기서 수정하지 않습니다. 생산계획 엑셀이 바뀌면 자동으로 따라갑니다.</p>
       </div>
     </div>
   );
@@ -1637,10 +1819,10 @@ function PrintChecklist({r}){
   // 헤더 정보 행
   const headerRows = dock
     ? [["Product Name (품명)", r.name, "Sampling Size (검사수량)", r.samplingSize],
-       ["Batch No.", r.batchNo, "Check Date (검사일)", fmtDate(r.checkDate)],
+       ["Batch No.", r.batchNo, "Check Date (검사일)", fmtDate(r.checkDate)+(r.shift?` (${r.shift})`:"")],
        ["Batch Size (생산수량)", r.batchSize, "검사자 (Shift Leader)", r.shiftLeader]]
     : [["Product Name (품명)", r.name, "Part No. (생산 품번)", r.part],
-       ["Batch(Lot) No.", r.lot, "Prod. Date (생산 일자)", fmtDate(r.prodDate)],
+       ["Batch(Lot) No.", r.lot, "Prod. Date (생산 일자)", fmtDate(r.prodDate)+(r.shift?` (${r.shift})`:"")],
        ["생산 기종", r.model, "Shift Leader", r.shiftLeader]];
 
   return (
