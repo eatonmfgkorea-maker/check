@@ -55,7 +55,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V029";
+const APP_VERSION = "V031";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -261,8 +261,10 @@ function defaultSettings(){
     masterSource: "snapshot",   // snapshot(초기 기본값) | plan(생산계획 엑셀 기준)
     masterLoadedAt: FE_SEED.savedAt || "",
     writers: ["황숙향"],
-    reviewers: [],
-    managers: [],
+    reviewers: ["이승현"],
+    managers: ["안병선"],
+    defaultS2: "이승현",   // 기본 검토자
+    defaultS3: "안병선",   // 기본 승인자
     passwords: {},   // { 이름: 해시 } — 결재 비밀번호
     emails: {},      // { 이름: 이메일 } — 결재 알림 메일
     adminPw: hashPw("1550612a"),   // 설정(관리자) 진입 비밀번호
@@ -357,7 +359,9 @@ function recTpl(r){
 function newRecord(type, settings){
   const base = {
     id: uid(), type, createdAt: nowStr(), updatedAt: nowStr(), status:"draft",
-    approval:{ s1:{name:"",approved:false,at:""}, s2:{name:"",approved:false,at:""}, s3:{name:"",approved:false,at:""} },
+    approval:{ s1:{name:"",approved:false,at:""},
+      s2:{name:(settings&&settings.defaultS2)||"", approved:false, at:""},
+      s3:{name:(settings&&settings.defaultS3)||"", approved:false, at:""} },
     comments: [],
   };
   if(type==="briefing"){
@@ -947,20 +951,20 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     const rec = recOf(type, row);
     if(!rec) return (
       <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date, shift:row.shift})}
-        className={`w-full px-2 py-1.5 rounded-lg border-2 border-dashed text-[12px] font-bold ${optional
+        className={`w-full px-1.5 py-1.5 rounded-lg border-2 border-dashed text-[11.5px] font-bold whitespace-nowrap ${optional
           ? "border-slate-200 text-slate-300 hover:border-slate-400 hover:text-slate-500"
           : "border-slate-300 text-slate-400 hover:border-slate-500 hover:text-slate-600"}`}>
         {optional?"작성 (선택)":"+ 작성"}
       </button>
     );
     if(rec.status==="draft") return (
-      <button onClick={()=>onEdit(rec)} className="w-full px-2 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[12px] font-bold border border-amber-200">임시저장 →</button>
+      <button onClick={()=>onEdit(rec)} className="w-full px-1.5 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[11.5px] font-bold border border-amber-200 whitespace-nowrap">임시저장</button>
     );
     if(rec.status==="pending") return (
-      <button onClick={()=>onOpen(rec)} className="w-full px-2 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-[12px] font-bold border border-sky-200">결재중</button>
+      <button onClick={()=>onOpen(rec)} className="w-full px-1.5 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-[11.5px] font-bold border border-sky-200 whitespace-nowrap">결재중</button>
     );
     return (
-      <button onClick={()=>onOpen(rec)} className="w-full px-2 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-[12px] font-bold border border-emerald-200">✓ 완료</button>
+      <button onClick={()=>onOpen(rec)} className="w-full px-1.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-[11.5px] font-bold border border-emerald-200 whitespace-nowrap">✓ 완료</button>
     );
   };
 
@@ -971,26 +975,27 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       </div>
       {rows.length===0 ? <div className="text-center text-slate-300 py-6 text-[13px]">계획 없음</div> : (
         <div className="overflow-x-auto">
-          <table className="w-full text-[13px]" style={{minWidth:"760px"}}>
+          <table className="w-full text-[13px]" style={{minWidth:"600px"}}>
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-[12px]">
-                <th className="text-left px-3 py-1.5 font-bold w-[120px]">라인</th>
-                <th className="text-left px-3 py-1.5 font-bold">품명</th>
-                <th className="text-left px-3 py-1.5 font-bold w-[110px]">품번</th>
-                <th className="text-right px-3 py-1.5 font-bold w-[80px]">수량</th>
-                <th className="text-center px-2 py-1.5 font-bold w-[106px]">Start Up</th>
-                <th className="text-center px-2 py-1.5 font-bold w-[106px]">Dock Audit</th>
-                <th className="text-center px-2 py-1.5 font-bold w-[106px]">초도양산 <span className="font-normal text-slate-400">(선택)</span></th>
+                <th className="text-left px-2 py-1.5 font-bold w-[130px]">라인</th>
+                <th className="text-left px-2 py-1.5 font-bold">품명 / 품번</th>
+                <th className="text-right px-2 py-1.5 font-bold w-[52px]">수량</th>
+                <th className="text-center px-1.5 py-1.5 font-bold w-[82px]">Start Up</th>
+                <th className="text-center px-1.5 py-1.5 font-bold w-[82px]">Dock Audit</th>
+                <th className="text-center px-1.5 py-1.5 font-bold w-[82px]">초도 <span className="font-normal text-slate-400">(선택)</span></th>
               </tr>
             </thead>
             <tbody>
               {rows.map(row=>(
                 <tr key={row.shift+row.pno} className="border-b border-slate-100">
-                  <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{row.line||"-"}</td>
-                  <td className="px-3 py-2 font-semibold text-slate-800">{row.name||"-"}</td>
-                  <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{row.pno}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{row.qty?row.qty.toLocaleString():"-"}</td>
-                  {CL_TYPES.map(([t,,req])=> <td key={t} className="px-2 py-1.5"><StatusBtn type={t} row={row} optional={!req}/></td>)}
+                  <td className="px-2 py-1.5 text-slate-600 text-[12px] whitespace-nowrap">{row.line||"-"}</td>
+                  <td className="px-2 py-1.5">
+                    <div className="font-semibold text-slate-800 leading-tight">{row.name||"-"}</div>
+                    <div className="text-[11px] text-slate-400 leading-tight">{row.pno}</div>
+                  </td>
+                  <td className="px-2 py-1.5 text-right text-slate-600 text-[12px]">{row.qty?row.qty.toLocaleString():"-"}</td>
+                  {CL_TYPES.map(([t,,req])=> <td key={t} className="px-1.5 py-1.5"><StatusBtn type={t} row={row} optional={!req}/></td>)}
                 </tr>
               ))}
             </tbody>
@@ -1859,6 +1864,24 @@ function PeopleSettings({settings, setSettings}){
       <ListEditor title="작성자 / 담당" hint="조회일지 작성자, 점검표 Shift Leader, 결재 1단계(담당)에 사용됩니다." items={settings.writers} onChange={v=>setSettings(p=>({...p,writers:v}))}/>
       <ListEditor title="검토자" hint="결재 2단계(검토)에 사용됩니다." items={settings.reviewers} onChange={v=>setSettings(p=>({...p,reviewers:v}))}/>
       <ListEditor title="부서장 / 승인" hint="결재 마지막 단계(승인)에 사용됩니다." items={settings.managers} onChange={v=>setSettings(p=>({...p,managers:v}))}/>
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="font-bold text-slate-700">기본 결재선</div>
+        <p className="text-[12px] text-slate-400 mt-0.5 mb-3">새 문서를 만들 때 검토/승인란에 자동으로 들어갈 사람입니다. (작성 화면에서 변경 가능)</p>
+        <div className="grid grid-cols-2 gap-3 max-w-md">
+          <Field label="기본 검토자">
+            <select className={inputCls} value={settings.defaultS2||""} onChange={e=>setSettings(p=>({...p, defaultS2:e.target.value}))}>
+              <option value="">(없음)</option>
+              {uniq([...(settings.reviewers||[]), settings.defaultS2].filter(Boolean)).map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+          </Field>
+          <Field label="기본 승인자">
+            <select className={inputCls} value={settings.defaultS3||""} onChange={e=>setSettings(p=>({...p, defaultS3:e.target.value}))}>
+              <option value="">(없음)</option>
+              {uniq([...(settings.managers||[]), settings.defaultS3].filter(Boolean)).map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+          </Field>
+        </div>
+      </div>
       <EmailSettings settings={settings} setSettings={setSettings}/>
       <PasswordSettings settings={settings} setSettings={setSettings}/>
       <AdminPwSettings settings={settings} setSettings={setSettings}/>
