@@ -55,7 +55,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V039";
+const APP_VERSION = "V040";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -702,6 +702,17 @@ function App(){
           if(r.data.settings) setSettings(mergeSettings(r.data.settings));
           if(r.data.planData && Array.isArray(r.data.planData.rows)) setPlanData(r.data.planData);
           setSync({state:"ok", msg:"동기화됨"});
+        } else if(r.ok){
+          // 드라이브 백업이 없거나 손상됨 → 이 기기의 로컬 데이터로 즉시 복구 저장
+          const effR = (Array.isArray(idbR)&&idbR.length) ? idbR : records;
+          const effS = idbS ? mergeSettings(idbS) : settings;
+          const effP = (idbP&&Array.isArray(idbP.rows)&&idbP.rows.length) ? idbP : planData;
+          if((effR&&effR.length) || (effP&&effP.rows&&effP.rows.length)){
+            const sv = await driveSave({records:effR, settings:effS, planData:effP, ver:APP_VERSION});
+            setSync({state: sv.ok?"ok":"err", msg: sv.ok?"백업 복구됨":"동기화 실패"});
+          } else {
+            setSync({state:"ok", msg:"새 백업"});
+          }
         } else setSync({state: r.off?"local":"err", msg: r.off?"":"동기화 실패"});
       }
       loadedRef.current = true;
@@ -715,15 +726,21 @@ function App(){
   useEffect(()=>{ saveLocal(LS_RECORDS, records); idbSet(LS_RECORDS, records); }, [records]);
   useEffect(()=>{ saveLocal(LS_SETTINGS, settings); idbSet(LS_SETTINGS, settings); }, [settings]);
   useEffect(()=>{ saveLocal(LS_PLAN, planData); idbSet(LS_PLAN, planData); }, [planData]);
+  const [saveNudge, setSaveNudge] = useState(0);
+  const retryRef = useRef(false);
   useEffect(()=>{
     if(!loadedRef.current || !GAS_URL) return;
     const h = setTimeout(async()=>{
       setSync(s=>({...s, state:"saving"}));
       const r = await driveSave({records, settings, planData, ver:APP_VERSION});
+      if(!r.ok && !retryRef.current){
+        retryRef.current = true;
+        setTimeout(()=>{ retryRef.current=false; setSaveNudge(n=>n+1); }, 8000);   // 1회 자동 재시도
+      }
       setSync({state: r.ok?"ok":"err", msg: r.ok?"저장됨":"저장 실패"});
     }, 1200);
     return ()=>clearTimeout(h);
-  }, [records, settings, planData]);
+  }, [records, settings, planData, saveNudge]);
 
   // 액션
   const upsert = useCallback((rec)=>{
@@ -845,7 +862,8 @@ function App(){
           onDownloadPhoto={downloadPhoto} onDeletePhoto={deleteBoardPhoto}
           onCreate={createFromPlan} onOpen={setViewing} onEdit={setEditing} />}
         {tab==="board" && <BoardView photos={photos} onReload={loadPhotos} getThumb={getThumb}
-          onDownload={downloadPhoto} onDelete={deleteBoardPhoto} />}
+          onDownload={downloadPhoto} onDelete={deleteBoardPhoto}
+          masterLines={settings.lines||[]} onUpload={uploadBoardPhoto} />}
         {tab==="new" && <NewView settings={settings} onPick={(type)=>{
           let rec = newRecord(type, settings);
           if(type==="briefing"){
@@ -1054,11 +1072,32 @@ function PhotoViewer({p, getThumb, onDownload, onDelete, onClose}){
 /* ============================================================
    현황판 탭 — 라인/날짜/주야 조회
    ============================================================ */
-function BoardView({photos, onReload, getThumb, onDownload, onDelete}){
+function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLines, onUpload}){
   const [fd, setFd] = useState(todayStr());   // 기본: 오늘만 ("" = 전체)
   const [fl, setFl] = useState("");        // 라인 필터
   const [fs, setFs] = useState("");        // 주야 필터
   const [viewer, setViewer] = useState(null);
+  // 직접 추가 (생산계획에 없는 라인도 가능)
+  const [addOpen, setAddOpen] = useState(false);
+  const [aDate, setADate] = useState(todayStr());
+  const [aLine, setALine] = useState("");
+  const [aLineCustom, setALineCustom] = useState("");
+  const [aShift, setAShift] = useState((new Date().getHours()>=6 && new Date().getHours()<18) ? "주간" : "야간");
+  const [aBusy, setABusy] = useState(false);
+  const addFileRef = useRef(null);
+  const effLine = aLine==="__custom__" ? aLineCustom.trim() : aLine;
+  const pickAddPhoto = ()=>{
+    if(!effLine){ alert("라인을 선택하거나 입력하세요."); return; }
+    addFileRef.current && addFileRef.current.click();
+  };
+  const onAddFile = async(e)=>{
+    const f = e.target.files && e.target.files[0]; e.target.value="";
+    if(!f) return;
+    setABusy(true);
+    const ok = await onUpload(f, {line: effLine, date: aDate, shift: aShift});
+    setABusy(false);
+    if(ok){ setAddOpen(false); setFd(aDate); setALineCustom(""); }
+  };
   const list = (photos&&photos.list)||[];
   const lines = useMemo(()=> [...new Set(list.map(p=>p.line).filter(Boolean))].sort((a,b)=>a.localeCompare(b,"ko")), [list]);
   const shown = useMemo(()=> list.filter(p=> (!fd || p.date===fd) && (!fl || p.line===fl) && (!fs || p.shift===fs)), [list, fd, fl, fs]);
@@ -1081,6 +1120,7 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete}){
           <option value="">주야 전체</option><option value="주간">주간</option><option value="야간">야간</option>
         </select>
         <button onClick={onReload} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-[12px] font-bold text-slate-600">🔄</button>
+        <button onClick={()=>setAddOpen(true)} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[12px] font-bold">📷 + 추가</button>
         <span className="ml-auto text-[11px] text-slate-400">{shown.length}장</span>
       </div>
 
@@ -1105,6 +1145,38 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete}){
           </div>
         </div>
       ))}
+
+      <input ref={addFileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onAddFile}/>
+      {addOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-5" onClick={()=>!aBusy&&setAddOpen(false)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+            <div className="text-[16px] font-extrabold text-slate-800">📷 현황판 사진 추가</div>
+            <p className="text-[12px] text-slate-400 mt-0.5 mb-4">생산계획에 없는 라인도 올릴 수 있습니다.</p>
+            <div className="space-y-3">
+              <Field label="날짜"><input type="date" className={inputCls} value={aDate} onChange={e=>setADate(e.target.value)}/></Field>
+              <Field label="라인">
+                <select className={inputCls} value={aLine} onChange={e=>setALine(e.target.value)}>
+                  <option value="">선택</option>
+                  {[...new Set([...(masterLines||[]), ...lines])].map(l=><option key={l} value={l}>{l}</option>)}
+                  <option value="__custom__">(직접 입력)</option>
+                </select>
+              </Field>
+              {aLine==="__custom__" && (
+                <Field label="라인명 직접 입력"><input className={inputCls} placeholder="예: Pilot 라인" value={aLineCustom} onChange={e=>setALineCustom(e.target.value)}/></Field>
+              )}
+              <Field label="주 / 야">
+                <select className={inputCls} value={aShift} onChange={e=>setAShift(e.target.value)}>
+                  <option value="주간">주간</option><option value="야간">야간</option>
+                </select>
+              </Field>
+            </div>
+            <div className="mt-5 flex gap-2">
+              <button disabled={aBusy} onClick={()=>setAddOpen(false)} className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-500 font-bold disabled:opacity-50">취소</button>
+              <button disabled={aBusy} onClick={pickAddPhoto} className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold disabled:opacity-50">{aBusy?"올리는 중…":"📷 사진 선택 / 촬영"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {viewer && <PhotoViewer p={viewer} getThumb={getThumb} onDownload={onDownload}
         onDelete={async()=>{ await onDelete(viewer); setViewer(null); }} onClose={()=>setViewer(null)}/>}
