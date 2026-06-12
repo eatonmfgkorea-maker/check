@@ -55,7 +55,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V038";
+const APP_VERSION = "V039";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -1055,7 +1055,7 @@ function PhotoViewer({p, getThumb, onDownload, onDelete, onClose}){
    현황판 탭 — 라인/날짜/주야 조회
    ============================================================ */
 function BoardView({photos, onReload, getThumb, onDownload, onDelete}){
-  const [fd, setFd] = useState("");        // 날짜 필터 ("" = 전체)
+  const [fd, setFd] = useState(todayStr());   // 기본: 오늘만 ("" = 전체)
   const [fl, setFl] = useState("");        // 라인 필터
   const [fs, setFs] = useState("");        // 주야 필터
   const [viewer, setViewer] = useState(null);
@@ -1086,7 +1086,7 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete}){
 
       {photos.state==="loading" && list.length===0 && <div className="text-center text-slate-300 py-14 text-[14px]">불러오는 중…</div>}
       {photos.state!=="loading" && shown.length===0 && (
-        <div className="text-center text-slate-400 py-14 text-[14px]">현황판 사진이 없습니다.<br/><span className="text-[12px]">생산계획 탭에서 라인별로 📷 + 를 눌러 올릴 수 있어요.</span></div>
+        <div className="text-center text-slate-400 py-14 text-[14px]">{fd?`${fmtDate(fd)} 현황판 사진이 없습니다.`:"현황판 사진이 없습니다."}<br/><span className="text-[12px]">생산계획 탭에서 라인별로 📷+ 를 눌러 올릴 수 있고, {fd?"위에서 [전체 날짜]를 누르면 지난 사진도 보여요.":"날짜·라인으로 필터할 수 있어요."}</span></div>
       )}
 
       {byDate.map(([d, arr])=>(
