@@ -24,7 +24,11 @@
   /* iOS 등에서 날짜/시간 입력값이 오른쪽으로 쏠리지 않고 다른 칸처럼 왼쪽 정렬되도록 */
   input[type="date"], input[type="time"], input[type="datetime-local"] {
     -webkit-appearance: none; appearance: none; text-align: left;
+    font-size: inherit; line-height: normal; min-height: 0; height: auto;
+    font-family: inherit;
   }
+  /* iOS에서 날짜칸 내부 값이 위아래로 늘어나며 칸을 키우는 것 방지 */
+  input[type="date"]::-webkit-date-and-time-value { min-height: 1.2em; }
   input[type="date"]::-webkit-date-and-time-value,
   input[type="time"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
   input[type="date"]::-webkit-calendar-picker-indicator { margin-left: auto; opacity: .55; }
@@ -55,7 +59,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V040";
+const APP_VERSION = "V041";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -312,7 +316,7 @@ function defaultSettings(){
     places: ["FE","TCP"],
     deliveryCats: [...DEFAULT_DELIVERY_CATS],
     notices: [...DEFAULT_NOTICES],
-    defaultTime: "08:20 ~ 08:30",
+    defaultTime: "08:35 ~ 08:40",
   };
 }
 /* 생산계획 행에서 품목 마스터(라인/품명/품번) 생성 — 단일 소스 */
@@ -407,7 +411,7 @@ function newRecord(type, settings){
   };
   if(type==="briefing"){
     return { ...base,
-      date: todayStr(), time: settings.defaultTime||"08:20 ~ 08:30",
+      date: todayStr(), time: settings.defaultTime||"08:35 ~ 08:40",
       place: settings.places[0]||"FE", writer: settings.writers[0]||"", absentees:"",
       planDay:"", planNight:"",
       notices:[...(settings.notices||DEFAULT_NOTICES)],
