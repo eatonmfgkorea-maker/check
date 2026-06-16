@@ -65,7 +65,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V047";
+const APP_VERSION = "V048";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -1701,10 +1701,10 @@ function ChecklistFields({r, set, setR, settings, planData}){
                   {it.m && <div className="text-[11px] text-slate-400 mt-0.5">검사방법: {it.m}</div>}
                 </div>
               </div>
-              <div className="mt-2.5 flex items-center gap-2">
+              <div className="mt-2.5 flex items-stretch gap-2">
                 <div className="w-32"><OkNg value={v.r} onChange={x=>setItem(it.no,{r:x})}/></div>
-                {r.type==="dock" && <input className="w-20 px-2 py-2 rounded-lg border border-slate-300 text-[13px] text-center" inputMode="numeric" placeholder="불량수" value={v.q} onChange={e=>setItem(it.no,{q:e.target.value})}/>}
-                <input className="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-[13px]" placeholder={r.type==="dock"?"비고":"Remarks"} value={v.rm} onChange={e=>setItem(it.no,{rm:e.target.value})}/>
+                {r.type==="dock" && <input className="w-20 h-11 px-2 rounded-lg border border-slate-300 text-[13px] text-center" inputMode="numeric" placeholder="불량수" value={v.q} onChange={e=>setItem(it.no,{q:e.target.value})}/>}
+                <input className="flex-1 h-11 px-3 rounded-lg border border-slate-300 text-[13px]" placeholder={r.type==="dock"?"비고":"Remarks"} value={v.rm} onChange={e=>setItem(it.no,{rm:e.target.value})}/>
               </div>
             </div>
           );
@@ -1715,9 +1715,9 @@ function ChecklistFields({r, set, setR, settings, planData}){
             <div className="text-[12px] font-bold text-amber-600 mb-1">{tpl.paLabel}</div>
             <div className="text-[14px] text-slate-800 leading-snug">{tpl.pa.t}</div>
             <div className="text-[11px] text-slate-400 mt-0.5">검사방법: {tpl.pa.m}</div>
-            <div className="mt-2.5 flex items-center gap-2">
+            <div className="mt-2.5 flex items-stretch gap-2">
               <div className="w-32"><OkNg value={r.productAudit.r} onChange={x=>setPA({r:x})}/></div>
-              <input className="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-[13px]" placeholder="비고" value={r.productAudit.rm} onChange={e=>setPA({rm:e.target.value})}/>
+              <input className="flex-1 h-11 px-3 rounded-lg border border-slate-300 text-[13px]" placeholder="비고" value={r.productAudit.rm} onChange={e=>setPA({rm:e.target.value})}/>
             </div>
           </div>
         )}
