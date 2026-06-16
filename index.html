@@ -65,7 +65,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V046";
+const APP_VERSION = "V047";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -551,7 +551,7 @@ function OkNg({value, onChange, disabled}){
   const btn = (v, offCls, onCls) => (
     <button type="button" disabled={disabled}
       onClick={()=>onChange(value===v ? "" : v)}
-      className={`flex-1 py-2 rounded-lg text-[14px] font-extrabold border-2 transition-all ${value===v?onCls:offCls}`}>{v}</button>
+      className={`flex-1 h-11 rounded-lg text-[14px] font-extrabold border-2 transition-all flex items-center justify-center ${value===v?onCls:offCls}`}>{v}</button>
   );
   return (
     <div className="flex gap-2">
@@ -1542,11 +1542,20 @@ function Editor({rec, settings, records, planData, onCancel, onSaveDraft, onSubm
   };
 
   function validate(submit){
-    if(r.type!=="briefing"){
+    if(!submit && r.type!=="briefing"){
       if(!r.name || !r.part){ alert("품명/품번을 선택하세요."); return false; }
     }
     if(submit){
       if(r.type!=="briefing"){
+        const need = [];
+        if(!r.name) need.push("품명");
+        if(!r.part) need.push("생산품번");
+        if(!r.shift) need.push("주/야");
+        if(!r.shiftLeader) need.push("Shift Leader");
+        if(r.type==="dock"){ if(!r.checkDate) need.push("검사일"); }
+        else { if(!r.prodDate) need.push("생산일자"); }
+        if(need.length){ alert(`입력하지 않은 항목이 있습니다.\n\n${need.join(", ")}\n\n위 항목을 모두 채운 뒤 결재상신하세요.`); return false; }
+
         const t = recTpl(r);
         const missingNos = (t.items||[]).filter(it=> !((r.items[it.no]||{}).r)).map(it=>it.no);
         let msg = "";
