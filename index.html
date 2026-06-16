@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nanum+Pen+Script&family=Nanum+Brush+Script&family=Gaegu&family=Gamja+Flower&family=Hi+Melody&family=Dokdo&family=Yeon+Sung&family=Poor+Story&family=East+Sea+Dokdo&family=Single+Day&display=swap" />
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 <style>
   * { -webkit-tap-highlight-color: transparent; }
@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V049";
+const APP_VERSION = "V051";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -317,10 +317,9 @@ function defaultSettings(){
     masterSource: "snapshot",   // snapshot(초기 기본값) | plan(생산계획 엑셀 기준)
     masterLoadedAt: FE_SEED.savedAt || "",
     writers: ["황숙향"],
-    reviewers: ["이승현"],
-    managers: ["안병선"],
-    defaultS2: "이승현",   // 기본 검토자
-    defaultS3: "안병선",   // 기본 승인자
+    reviewers: [],
+    managers: ["이승현"],
+    defaultS3: "이승현",   // 기본 승인자 (검토 단계 없음)
     passwords: {},   // { 이름: 해시 } — 결재 비밀번호
     emails: {},      // { 이름: 이메일 } — 결재 알림 메일
     adminPw: hashPw("1550612a"),   // 설정(관리자) 진입 비밀번호
@@ -416,7 +415,7 @@ function newRecord(type, settings){
   const base = {
     id: uid(), type, createdAt: nowStr(), updatedAt: nowStr(), status:"draft",
     approval:{ s1:{name:"",approved:false,at:""},
-      s2:{name:(settings&&settings.defaultS2)||"", approved:false, at:""},
+      s2:{name:"", approved:true, at:""},
       s3:{name:(settings&&settings.defaultS3)||"", approved:false, at:""} },
     comments: [],
   };
@@ -553,15 +552,16 @@ function StatusBadge({status}){
 }
 
 function OkNg({value, onChange, disabled}){
-  const btn = (v, offCls, onCls) => (
+  const btn = (v, label, offCls, onCls) => (
     <button type="button" disabled={disabled}
       onClick={()=>onChange(value===v ? "" : v)}
-      className={`flex-1 h-11 rounded-lg text-[14px] font-extrabold border-2 transition-all flex items-center justify-center ${value===v?onCls:offCls}`}>{v}</button>
+      className={`flex-1 h-11 rounded-lg text-[13px] font-extrabold border-2 transition-all flex items-center justify-center ${value===v?onCls:offCls}`}>{label}</button>
   );
   return (
-    <div className="flex gap-2">
-      {btn("OK","border-emerald-200 bg-emerald-50 text-emerald-400","border-emerald-600 bg-emerald-600 text-white shadow-md ring-2 ring-emerald-200 scale-[1.03]")}
-      {btn("NG","border-rose-200 bg-rose-50 text-rose-300","border-rose-600 bg-rose-600 text-white shadow-md ring-2 ring-rose-200 scale-[1.03]")}
+    <div className="flex gap-1.5">
+      {btn("OK","OK","border-emerald-200 bg-emerald-50 text-emerald-400","border-emerald-600 bg-emerald-600 text-white shadow-md ring-2 ring-emerald-200 scale-[1.03]")}
+      {btn("NG","NG","border-rose-200 bg-rose-50 text-rose-300","border-rose-600 bg-rose-600 text-white shadow-md ring-2 ring-rose-200 scale-[1.03]")}
+      {btn("NA","N/A","border-slate-200 bg-slate-50 text-slate-300","border-slate-500 bg-slate-500 text-white shadow-md ring-2 ring-slate-200 scale-[1.03]")}
     </div>
   );
 }
@@ -772,29 +772,18 @@ function App(){
 
   function approveMany(targets, opts){
     opts = opts||{};
-    // 메일: 검토(s2) 승인 → 부서장(s3)에게. 같은 수신자끼리 묶어 1통. (완료 메일은 보내지 않음)
-    const byName = new Map();   // s3이름 -> {to, recs:[]}
-    targets.forEach(t=>{
-      if(t.step!=="s2") return;
-      const r = records.find(x=>x.id===t.id); if(!r) return;
-      const nm = r.approval.s3 && r.approval.s3.name;
-      if(!nm) return;
-      const to = (settings.emails||{})[nm];
-      if(!to) return;
-      if(!byName.has(nm)) byName.set(nm, {to, recs:[]});
-      byName.get(nm).recs.push(r);
-    });
-    byName.forEach((v,nm)=> sendApprovalMail(v.to, nm, v.recs));
     setRecords(prev=>prev.map(r=>{
       const t = targets.find(x=>x.id===r.id);
       if(!t) return r;
       const a = { s1:{...r.approval.s1}, s2:{...r.approval.s2}, s3:{...r.approval.s3} };
-      if(t.step==="s2"){ if(!a.s1.approved) return r; a.s2={...a.s2, approved:true, at:nowStr()}; }
-      if(t.step==="s3"){ if(!a.s2.approved) return r; a.s3={...a.s3, approved:true, at:nowStr()}; }
+      // 단일 승인: 작성/검토는 자동 처리, 승인(s3)만 결재
+      if(!a.s1.approved) a.s1={...a.s1, approved:true, at:a.s1.at||nowStr()};
+      if(!a.s2.approved) a.s2={...a.s2, approved:true, at:a.s2.at||""};
+      a.s3={...a.s3, approved:true, at:nowStr()};
       let comments = Array.isArray(r.comments) ? [...r.comments] : [];
       if(opts.comment && opts.comment.trim()){
         const L = roleLabels(r.type);
-        comments.push({ name: opts.name || (t.step==="s2"?a.s2.name:a.s3.name), role: t.step==="s2"?L[1]:L[2], text: opts.comment.trim(), at: nowStr() });
+        comments.push({ name: opts.name || a.s3.name, role: L[2], text: opts.comment.trim(), at: nowStr() });
       }
       const done = a.s1.approved && a.s2.approved && a.s3.approved;
       return {...r, approval:a, comments, status: done?"done":"pending", updatedAt:nowStr()};
@@ -830,7 +819,12 @@ function App(){
     return <Editor rec={editing} settings={settings} records={records} planData={planData}
       onCancel={()=>setEditing(null)}
       onSaveDraft={(r)=>{ r.status="draft"; upsert(r); setEditing(null); setTab("list"); }}
-      onSubmit={(r)=>{ r.status="pending"; r.approval.s1={name:r.approval.s1.name||r.shiftLeader||r.writer||"", approved:true, at:nowStr()}; upsert(r); { const nm=r.approval.s2.name, to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, [r]); } setEditing(null); setTab("inbox"); }}
+      onSubmit={(r)=>{ r.status="pending";
+        r.approval.s1={name:r.approval.s1.name||r.shiftLeader||r.writer||"", approved:true, at:nowStr()};
+        r.approval.s2={name:r.approval.s2.name||"", approved:true, at:r.approval.s2.at||""};
+        upsert(r);
+        { const nm=r.approval.s3.name, to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, [r]); }
+        setEditing(null); setTab("inbox"); }}
     />;
   }
 
@@ -1568,7 +1562,7 @@ function Editor({rec, settings, records, planData, onCancel, onSaveDraft, onSubm
         if(r.type==="dock" && !(r.productAudit && r.productAudit.r)) msg += (msg?"\n":"") + "Product Audit 미점검";
         if(msg){ alert(`점검하지 않은 항목이 있습니다.\n\n${msg}\n\n모든 항목에 OK / NG 를 선택한 뒤 결재상신하세요.`); return false; }
       }
-      if(!r.approval.s2.name || !r.approval.s3.name){ alert("결재선(검토/승인)을 지정하세요."); return false; }
+      if(!r.approval.s3.name){ alert("승인자를 지정하세요."); return false; }
     }
     return true;
   }
@@ -1595,14 +1589,11 @@ function Editor({rec, settings, records, planData, onCancel, onSaveDraft, onSubm
             <Field label={roleLabels(r.type)[0]+" (작성자)"}>
               <PeopleSelect list={settings.writers} value={r.approval.s1.name || (r.shiftLeader||r.writer||"")} onChange={v=>setApproval("s1",v)}/>
             </Field>
-            <Field label={roleLabels(r.type)[1]} req>
-              <PeopleSelect list={settings.reviewers} value={r.approval.s2.name} onChange={v=>setApproval("s2",v)}/>
-            </Field>
-            <Field label={roleLabels(r.type)[2]} req>
+            <Field label="승인자" req>
               <PeopleSelect list={settings.managers} value={r.approval.s3.name} onChange={v=>setApproval("s3",v)}/>
             </Field>
           </div>
-          <p className="text-[12px] text-slate-400 mt-2">결재상신 시 <b>{roleLabels(r.type)[0]}</b> 서명이 자동 처리되고, 결재함에서 {roleLabels(r.type)[1]} → {roleLabels(r.type)[2]} 순으로 승인됩니다.</p>
+          <p className="text-[12px] text-slate-400 mt-2">결재상신 시 <b>{roleLabels(r.type)[0]}</b> 서명이 자동 처리되고, 결재함에서 <b>승인자</b>가 승인하면 완료됩니다.</p>
         </section>
       </main>
 
@@ -1707,7 +1698,7 @@ function ChecklistFields({r, set, setR, settings, planData}){
                 </div>
               </div>
               <div className="mt-2.5 flex items-stretch gap-2">
-                <div className="w-32"><OkNg value={v.r} onChange={x=>setItem(it.no,{r:x})}/></div>
+                <div className="w-44"><OkNg value={v.r} onChange={x=>setItem(it.no,{r:x})}/></div>
                 {r.type==="dock" && <input className="w-20 h-11 px-2 rounded-lg border border-slate-300 text-[13px] text-center" inputMode="numeric" placeholder="불량수" value={v.q} onChange={e=>setItem(it.no,{q:e.target.value})}/>}
                 <input className="flex-1 h-11 px-3 rounded-lg border border-slate-300 text-[13px]" placeholder={r.type==="dock"?"비고":"Remarks"} value={v.rm} onChange={e=>setItem(it.no,{rm:e.target.value})}/>
               </div>
@@ -1721,7 +1712,7 @@ function ChecklistFields({r, set, setR, settings, planData}){
             <div className="text-[14px] text-slate-800 leading-snug">{tpl.pa.t}</div>
             <div className="text-[11px] text-slate-400 mt-0.5">검사방법: {tpl.pa.m}</div>
             <div className="mt-2.5 flex items-stretch gap-2">
-              <div className="w-32"><OkNg value={r.productAudit.r} onChange={x=>setPA({r:x})}/></div>
+              <div className="w-44"><OkNg value={r.productAudit.r} onChange={x=>setPA({r:x})}/></div>
               <input className="flex-1 h-11 px-3 rounded-lg border border-slate-300 text-[13px]" placeholder="비고" value={r.productAudit.rm} onChange={e=>setPA({rm:e.target.value})}/>
             </div>
           </div>
@@ -1895,7 +1886,7 @@ function buildApprovalListMail(recs, toName){
     const m = TYPE_META[r.type];
     const body = rowsOf(r).map(([k,v])=>`<tr><td style="${tdK}">${k}</td><td style="${tdV}">${v}</td></tr>`).join("");
     const L = roleLabels(r.type); const a = r.approval||{};
-    const chain = `${L[0]} ${a.s1&&a.s1.name||"-"} → ${L[1]} ${a.s2&&a.s2.name||"-"} → ${L[2]} ${a.s3&&a.s3.name||"-"}`;
+    const chain = `${L[0]} ${a.s1&&a.s1.name||"-"} → ${L[2]} ${a.s3&&a.s3.name||"-"}`;
     return `<div style="margin:0 0 16px">
       <div style="display:inline-block;font-size:13px;font-weight:800;color:#fff;background:${m.accent};padding:4px 12px;border-radius:6px;margin:0 0 8px">${m.label}${r.name?` · ${r.name}`:""}</div>
       <table style="border-collapse:collapse;width:100%">${body}</table>
@@ -1928,8 +1919,8 @@ function InboxView({records, onApprove, onOpen, passwords, onSetPassword}){
   const pending = useMemo(()=> records.filter(r=>r.status==="pending")
     .sort((a,b)=>(a.updatedAt||"").localeCompare(b.updatedAt||"")), [records]);
 
-  const stepOf = (r)=> !r.approval.s2.approved ? "s2" : "s3";
-  const currentApprover = (r)=>{ const a=r.approval; const s=stepOf(r); return (s==="s2"?a.s2.name:a.s3.name)||"(미지정)"; };
+  const stepOf = (r)=> "s3";
+  const currentApprover = (r)=> (r.approval.s3.name)||"(미지정)";
 
   const groups = useMemo(()=>{
     const m=new Map();
@@ -2001,9 +1992,9 @@ function InboxView({records, onApprove, onOpen, passwords, onSetPassword}){
 
 function InboxCard({r, onOpen, onApproveClick}){
   const L = roleLabels(r.type); const a=r.approval; const meta=TYPE_META[r.type];
-  const step = !a.s2.approved ? "s2" : "s3";
-  const stepName = step==="s2" ? a.s2.name : a.s3.name;
-  const stepLabel = step==="s2" ? L[1] : L[2];
+  const step = "s3";
+  const stepName = a.s3.name;
+  const stepLabel = L[2];
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4">
       <div className="flex items-center gap-2 mb-1">
@@ -2014,15 +2005,13 @@ function InboxCard({r, onOpen, onApproveClick}){
       <div className="font-bold text-slate-800">{recTitle(r)}</div>
       <div className="mt-2 flex items-center gap-2 text-[12px] flex-wrap">
         <Step ok={a.s1.approved} label={L[0]} name={a.s1.name}/>
-        <span className="text-slate-300">→</span>
-        <Step ok={a.s2.approved} label={L[1]} name={a.s2.name}/>
-        <span className="text-slate-300">→</span>
+        <div className="flex-1 h-px bg-slate-200"/>
         <Step ok={a.s3.approved} label={L[2]} name={a.s3.name}/>
       </div>
       <div className="mt-3 flex gap-2">
         <button className="px-3 py-2 rounded-lg border border-slate-300 text-[13px] text-slate-600" onClick={()=>onOpen(r)}>내용 보기</button>
         <button className="flex-1 py-2 rounded-lg text-white text-[14px] font-bold" style={{background:meta.accent}} onClick={onApproveClick}>
-          {step==="s3"?"최종승인":"승인"}{stepName?` · ${stepName}`:""}
+          승인{stepName?` · ${stepName}`:""}
         </button>
       </div>
     </div>
@@ -2074,7 +2063,7 @@ function AuthModal({auth, passwords, onSetPassword, onClose, onConfirm}){
         )}
         <div className="mt-5 flex gap-2">
           <button className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-bold" onClick={onClose}>취소</button>
-          <button className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold" onClick={submit}>{(()=>{ const act=auth.targets.every(t=>t.step==="s3")?"최종승인":"승인"; return has?act:`설정 후 ${act}`; })()}</button>
+          <button className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold" onClick={submit}>{has?"승인":"설정 후 승인"}</button>
         </div>
       </div>
     </div>
@@ -2311,18 +2300,11 @@ function PeopleSettings({settings, setSettings}){
   return (
     <div className="space-y-3">
       <ListEditor title="작성자 / 담당" hint="조회일지 작성자, 점검표 Shift Leader, 결재 1단계(담당)에 사용됩니다." items={settings.writers} onChange={v=>setSettings(p=>({...p,writers:v}))}/>
-      <ListEditor title="검토자" hint="결재 2단계(검토)에 사용됩니다." items={settings.reviewers} onChange={v=>setSettings(p=>({...p,reviewers:v}))}/>
-      <ListEditor title="부서장 / 승인" hint="결재 마지막 단계(승인)에 사용됩니다." items={settings.managers} onChange={v=>setSettings(p=>({...p,managers:v}))}/>
+      <ListEditor title="승인자" hint="결재 승인에 사용됩니다." items={settings.managers} onChange={v=>setSettings(p=>({...p,managers:v}))}/>
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="font-bold text-slate-700">기본 결재선</div>
-        <p className="text-[12px] text-slate-400 mt-0.5 mb-3">새 문서를 만들 때 검토/승인란에 자동으로 들어갈 사람입니다. (작성 화면에서 변경 가능)</p>
-        <div className="grid grid-cols-2 gap-3 max-w-md">
-          <Field label="기본 검토자">
-            <select className={inputCls} value={settings.defaultS2||""} onChange={e=>setSettings(p=>({...p, defaultS2:e.target.value}))}>
-              <option value="">(없음)</option>
-              {uniq([...(settings.reviewers||[]), settings.defaultS2].filter(Boolean)).map(n=><option key={n} value={n}>{n}</option>)}
-            </select>
-          </Field>
+        <p className="text-[12px] text-slate-400 mt-0.5 mb-3">새 문서를 만들 때 승인란에 자동으로 들어갈 사람입니다. (작성 화면에서 변경 가능)</p>
+        <div className="max-w-xs">
           <Field label="기본 승인자">
             <select className={inputCls} value={settings.defaultS3||""} onChange={e=>setSettings(p=>({...p, defaultS3:e.target.value}))}>
               <option value="">(없음)</option>
@@ -2340,13 +2322,13 @@ function PeopleSettings({settings, setSettings}){
 
 function EmailSettings({settings, setSettings}){
   const emails = settings.emails||{};
-  const people = useMemo(()=> uniq([...(settings.reviewers||[]), ...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.reviewers, settings.managers, settings.writers]);
+  const people = useMemo(()=> uniq([...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.managers, settings.writers]);
   const setEmail=(name,val)=> setSettings(p=>({...p, emails:{...(p.emails||{}), [name]: val}}));
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4">
       <div className="font-bold text-slate-700">결재자 이메일 (알림 메일)</div>
       <p className="text-[12px] text-slate-400 mt-0.5 mb-3">결재가 올라오면 다음 결재자에게 이 주소로 "결재하러 가기" 메일이 전송됩니다. 메일 발송은 백업용 Apps Script가 연결되어 있어야 동작합니다.</p>
-      {people.length===0 ? <p className="text-[12px] text-slate-300">먼저 작성자/검토자/부서장을 등록하세요.</p> : (
+      {people.length===0 ? <p className="text-[12px] text-slate-300">먼저 작성자/승인자를 등록하세요.</p> : (
         <div className="space-y-1.5">
           {people.map(name=>(
             <div key={name} className="flex items-center gap-2">
@@ -2386,7 +2368,7 @@ function AdminPwSettings({settings, setSettings}){
 
 function PasswordSettings({settings, setSettings}){
   const pwMap = settings.passwords||{};
-  const people = useMemo(()=> uniq([...(settings.reviewers||[]), ...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.reviewers, settings.managers, settings.writers]);
+  const people = useMemo(()=> uniq([...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.managers, settings.writers]);
   const [editing, setEditing] = useState(null);  // name being set
   const [pw, setPw] = useState("");
 
@@ -2404,7 +2386,7 @@ function PasswordSettings({settings, setSettings}){
     <div className="rounded-2xl border border-slate-200 bg-white p-4">
       <div className="font-bold text-slate-700">결재 비밀번호</div>
       <p className="text-[12px] text-slate-400 mt-0.5 mb-3">결재자가 승인할 때 입력하는 비밀번호입니다. 비밀번호는 암호화되어 저장됩니다(평문 저장 안 됨). 미설정 시 첫 결재에서 본인이 직접 설정할 수도 있습니다.</p>
-      {people.length===0 ? <p className="text-[12px] text-slate-300">먼저 검토자/부서장을 등록하세요.</p> : (
+      {people.length===0 ? <p className="text-[12px] text-slate-300">먼저 승인자를 등록하세요.</p> : (
         <div className="space-y-1.5">
           {people.map(name=>{
             const set = !!pwMap[name];
@@ -2493,7 +2475,7 @@ function CommentsBlock({rec}){
 
 function SignBox({rec}){
   const L = roleLabels(rec.type); const a=rec.approval;
-  const cells=[[L[0],a.s1],[L[1],a.s2],[L[2],a.s3]];
+  const cells=[[L[0],a.s1],[L[2],a.s3]];
   return (
     <table style={{borderCollapse:"collapse"}}>
       <tbody>
@@ -2551,8 +2533,9 @@ function PrintChecklist({r}){
             <td className="cell" style={{width:"5%", textAlign:"center", fontWeight:700}}>No</td>
             <td className="cell" style={{fontWeight:700}}>검 사 항 목</td>
             <td className="cell" style={{width:"22%", fontWeight:700}}>검사방법</td>
-            <td className="cell" style={{width:"7%", textAlign:"center", fontWeight:700}}>O.K</td>
-            <td className="cell" style={{width:"7%", textAlign:"center", fontWeight:700}}>N.G</td>
+            <td className="cell" style={{width:"6%", textAlign:"center", fontWeight:700}}>O.K</td>
+            <td className="cell" style={{width:"6%", textAlign:"center", fontWeight:700}}>N.G</td>
+            <td className="cell" style={{width:"6%", textAlign:"center", fontWeight:700}}>N/A</td>
             {dock && <td className="cell" style={{width:"9%", textAlign:"center", fontWeight:700}}>불량수량</td>}
             <td className="cell" style={{width:"18%", fontWeight:700}}>{dock?"비고":"Remarks"}</td>
           </tr>
@@ -2567,6 +2550,7 @@ function PrintChecklist({r}){
                 <td className="cell" style={{fontSize:"10px", color:"#444"}}>{it.m}</td>
                 <td className="cell" style={{textAlign:"center", color:"#059669"}}>{mark(v,"OK")}</td>
                 <td className="cell" style={{textAlign:"center", color:"#e11d48"}}>{mark(v,"NG")}</td>
+                <td className="cell" style={{textAlign:"center", color:"#64748b"}}>{mark(v,"NA")}</td>
                 {dock && <td className="cell" style={{textAlign:"center"}}>{v.q}</td>}
                 <td className="cell" style={{fontSize:"10px"}}>{v.rm}</td>
               </tr>
@@ -2575,7 +2559,7 @@ function PrintChecklist({r}){
           {dock && (()=>{ const v=r.productAudit||{r:"",rm:""}; return (
             <>
               <tr style={{background:"#fff7ed", fontSize:"11px"}}>
-                <td className="cell" colSpan={dock?6:5} style={{fontWeight:700, color:"#b45309"}}>{tpl.paLabel}</td>
+                <td className="cell" colSpan={dock?7:6} style={{fontWeight:700, color:"#b45309"}}>{tpl.paLabel}</td>
                 <td className="cell"></td>
               </tr>
               <tr style={{fontSize:"11px"}}>
@@ -2584,6 +2568,7 @@ function PrintChecklist({r}){
                 <td className="cell" style={{fontSize:"10px", color:"#444"}}>{tpl.pa.m}</td>
                 <td className="cell" style={{textAlign:"center", color:"#059669"}}>{mark(v,"OK")}</td>
                 <td className="cell" style={{textAlign:"center", color:"#e11d48"}}>{mark(v,"NG")}</td>
+                <td className="cell" style={{textAlign:"center", color:"#64748b"}}>{mark(v,"NA")}</td>
                 <td className="cell"></td>
                 <td className="cell" style={{fontSize:"10px"}}>{v.rm}</td>
               </tr>
