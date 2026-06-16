@@ -23,10 +23,15 @@
   textarea { resize: vertical; }
   /* 모든 입력칸(텍스트/날짜/시간/선택)을 같은 높이·정렬로 통일 — type 미지정 input 포함 */
   input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), select {
-    box-sizing: border-box; font-family: inherit; font-size: inherit; line-height: 1.25;
+    box-sizing: border-box; font-family: inherit; font-size: inherit;
     height: 44px; min-height: 44px;   /* 모든 입력칸 동일 높이 강제 */
     padding-top: 0; padding-bottom: 0;
+    line-height: 44px;                /* iOS 텍스트 세로 가운데 정렬 */
+    vertical-align: middle;
   }
+  /* h-11(44px)로 지정된 점검표 비고/불량수 input도 동일 처리 */
+  input.h-11 { line-height: 44px; }
+  textarea { line-height: 1.4 !important; }   /* textarea는 여러 줄이므로 예외 */
   textarea { box-sizing: border-box; font-family: inherit; font-size: inherit; line-height: 1.4; }
   input[type="date"], input[type="time"], input[type="datetime-local"], select {
     -webkit-appearance: none; -moz-appearance: none; appearance: none; text-align: left;
@@ -65,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V048";
+const APP_VERSION = "V049";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
