@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V051";
+const APP_VERSION = "V052";
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -347,6 +347,8 @@ function masterFromPlanRows(rows){
 function mergeSettings(cached){
   const base = defaultSettings();
   if(!cached || typeof cached!=="object") return base;
+  // 옛 기본 조회시간이 저장돼 있으면 새 기본값으로 자동 갱신
+  if(cached.defaultTime==="08:20 ~ 08:30" || cached.defaultTime==="08:20~08:30") cached = {...cached, defaultTime: base.defaultTime};
   const keepPlanMaster = cached.masterSource==="plan" && Array.isArray(cached.items) && cached.items.length>0;
   if(keepPlanMaster) return { ...base, ...cached };
   return { ...base, ...cached, lines: base.lines, items: base.items, masterSource: base.masterSource, masterLoadedAt: base.masterLoadedAt };
