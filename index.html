@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V054";
+const APP_VERSION = "V056";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -364,6 +364,15 @@ const nowStr = () => new Date().toISOString();
 function fmtDate(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function fmtDateTime(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${fmtDate(s)} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }
 function roleLabels(type){ return ["작성","검토","승인"]; }
+function lotOf(r){ if(!r||r.type==="briefing") return ""; return (r.type==="dock" ? r.batchNo : r.lot) || ""; }
+// 조회일지용: 특정 날짜·주야의 생산계획을 "라인: 품명, 품명 / 라인2: 품명" 형태로
+function briefingPlanText(planData, date, shift){
+  const rows = ((planData&&planData.rows)||[]).filter(r=> r.date===date && r.shift===shift);
+  if(!rows.length) return "";
+  const byLine = new Map();
+  rows.forEach(r=>{ const k=r.line||"-"; if(!byLine.has(k)) byLine.set(k,[]); const nm=(r.name||r.pno||"").trim(); if(nm && !byLine.get(k).includes(nm)) byLine.get(k).push(nm); });
+  return [...byLine.entries()].map(([ln,arr])=> `${ln}: ${arr.join(", ")}`).join("  /  ");
+}
 const uniq = (arr)=>Array.from(new Set(arr));
 // 결재 비밀번호용 경량 해시 (cyrb53) — 평문 저장 방지용. 암호학적 강도는 아님(사내용).
 function hashPw(str){
@@ -683,6 +692,9 @@ function App(){
         .sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""))[0];
       if(latest) rec = cloneBriefingContent(rec, latest);
       rec.date = p.date;
+      // 그날 생산계획(주간/야간)을 라인별 품명으로 자동 채움
+      rec.planDay = briefingPlanText(planRef.current, p.date, "주간");
+      rec.planNight = briefingPlanText(planRef.current, p.date, "야간");
     } else {
       rec.line = p.line||""; rec.name = p.name||""; rec.part = p.pno||""; rec.model = p.line||rec.model||"";
       rec.shift = p.shift||"";
@@ -923,7 +935,7 @@ function ListView({records, onOpen, onEdit, onDelete}){
     {key:"type",  label:"점검표", w:"118px", get:r=> TYPE_META[r.type].label},
     {key:"line",  label:"라인",   w:"120px", get:r=> (r.type==="briefing"?(r.place||""):(r.line||""))||"(없음)"},
     {key:"item",  label:"아이템", w:"auto",  get:r=> (r.type==="briefing"?"(조회일지)":(r.name||""))||"(없음)"},
-    {key:"lot",   label:"Lot",   w:"120px", get:r=> (r.type==="briefing"?"-":(r.lot||""))||"(없음)"},
+    {key:"lot",   label:"Lot",   w:"120px", get:r=> r.type==="briefing"?"-":(lotOf(r)||"(없음)")},
     {key:"status",label:"결재",   w:"96px",  get:r=> statusText(r)},
   ], []);
 
@@ -1011,7 +1023,7 @@ function ListView({records, onOpen, onEdit, onDelete}){
                 <td className="px-2 py-2"><span className="text-[11px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap" style={{color:TYPE_META[r.type].accent, background:TYPE_META[r.type].soft}}>{TYPE_META[r.type].label}</span></td>
                 <td className="px-2 py-2 text-slate-700 whitespace-nowrap">{r.type==="briefing"?(r.place||"-"):(r.line||"-")}</td>
                 <td className="px-2 py-2 font-semibold text-slate-800"><div className="truncate max-w-[220px]">{r.type==="briefing"?"—":(r.name||"-")}</div></td>
-                <td className="px-2 py-2 text-slate-500 whitespace-nowrap">{r.type==="briefing"?"—":(r.lot||"-")}</td>
+                <td className="px-2 py-2 text-slate-500 whitespace-nowrap">{r.type==="briefing"?"—":(lotOf(r)||"-")}</td>
                 <td className="px-2 py-2"><StatusBadge status={r.status}/></td>
                 <td className="px-2 py-2" onClick={e=>e.stopPropagation()}>
                   <div className="flex gap-1 justify-end">
@@ -1581,7 +1593,7 @@ function Editor({rec, settings, records, planData, onCancel, onSaveDraft, onSubm
 
       <main className="max-w-3xl mx-auto px-4 pt-5 space-y-5">
         {r.type==="briefing"
-          ? <BriefingFields r={r} set={set} setR={setR} settings={settings} onLoadRecent={loadRecent} hasRecent={!!latestBriefing} recentDate={latestBriefing?latestBriefing.date:""}/>
+          ? <BriefingFields r={r} set={set} setR={setR} settings={settings} planData={planData} onLoadRecent={loadRecent} hasRecent={!!latestBriefing} recentDate={latestBriefing?latestBriefing.date:""}/>
           : <ChecklistFields r={r} set={set} setR={setR} settings={settings} planData={planData}/>}
 
         {/* 결재선 */}
@@ -1725,7 +1737,7 @@ function ChecklistFields({r, set, setR, settings, planData}){
 }
 
 /* ---- 조회일지 입력 ---- */
-function BriefingFields({r, set, setR, settings, onLoadRecent, hasRecent, recentDate}){
+function BriefingFields({r, set, setR, settings, planData, onLoadRecent, hasRecent, recentDate}){
   const setArr = (key, idx, val)=> setR(prev=>{ const a=[...prev[key]]; a[idx]=val; return {...prev,[key]:a}; });
   const addArr = (key, val)=> setR(prev=>({...prev,[key]:[...prev[key], val]}));
   const delArr = (key, idx)=> setR(prev=>({...prev,[key]:prev[key].filter((_,i)=>i!==idx)}));
@@ -1756,8 +1768,14 @@ function BriefingFields({r, set, setR, settings, onLoadRecent, hasRecent, recent
       <section className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
         <div className="font-bold text-emerald-700">◈ 조회내용</div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Field label="생산계획 — 주간"><input className={inputCls} placeholder="주 → D2UX, LX3 …" value={r.planDay} onChange={e=>set({planDay:e.target.value})}/></Field>
-          <Field label="생산계획 — 야간"><input className={inputCls} placeholder="야 → 31XX" value={r.planNight} onChange={e=>set({planNight:e.target.value})}/></Field>
+          <Field label={<span className="flex items-center gap-2">생산계획 — 주간
+            <button type="button" onClick={()=>{ const t=briefingPlanText(planData, r.date, "주간"); if(t) set({planDay:t}); else alert("해당 날짜의 주간 생산계획이 없습니다."); }}
+              className="text-[11px] font-bold text-indigo-500 border border-indigo-200 rounded px-1.5 py-0.5">🔄 계획 채우기</button></span>}>
+            <input className={inputCls} placeholder="주 → D2UX, LX3 …" value={r.planDay} onChange={e=>set({planDay:e.target.value})}/></Field>
+          <Field label={<span className="flex items-center gap-2">생산계획 — 야간
+            <button type="button" onClick={()=>{ const t=briefingPlanText(planData, r.date, "야간"); if(t) set({planNight:t}); else alert("해당 날짜의 야간 생산계획이 없습니다."); }}
+              className="text-[11px] font-bold text-indigo-500 border border-indigo-200 rounded px-1.5 py-0.5">🔄 계획 채우기</button></span>}>
+            <input className={inputCls} placeholder="야 → 31XX" value={r.planNight} onChange={e=>set({planNight:e.target.value})}/></Field>
         </div>
         <div>
           <div className="text-[12px] font-semibold text-slate-500 mb-1">공통 안내사항</div>
@@ -1907,7 +1925,7 @@ function buildApprovalListMail(recs, toName){
 
   const text = `${toName?toName+"님, ":""}결재 요청 ${n}건\n\n` + recs.map(r=>
     r.type==="briefing" ? `· [조회일지] ${fmtDate(r.date)} ${r.place||""} (작성 ${r.writer||"-"})`
-    : `· ${dOf(r)} ${TYPE_META[r.type].label} ${r.line||""} ${r.name||""} Lot ${r.lot||"-"}`
+    : `· ${dOf(r)} ${TYPE_META[r.type].label} ${r.line||""} ${r.name||""} Lot ${lotOf(r)||"-"}`
   ).join("\n") + `\n\n결재하러 가기: ${url}`;
 
   return { subject, html, text };
