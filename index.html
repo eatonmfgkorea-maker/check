@@ -70,7 +70,8 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V052";
+const APP_VERSION = "V054";
+const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
@@ -362,7 +363,7 @@ const todayStr = () => { const d=new Date(); return `${d.getFullYear()}-${String
 const nowStr = () => new Date().toISOString();
 function fmtDate(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function fmtDateTime(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${fmtDate(s)} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }
-function roleLabels(type){ return type==="briefing" ? ["담당","검토","부서장"] : ["작성","검토","승인"]; }
+function roleLabels(type){ return ["작성","검토","승인"]; }
 const uniq = (arr)=>Array.from(new Set(arr));
 // 결재 비밀번호용 경량 해시 (cyrb53) — 평문 저장 방지용. 암호학적 강도는 아님(사내용).
 function hashPw(str){
@@ -386,7 +387,6 @@ function signStyle(name){
 function cloneBriefingContent(target, src){
   if(!src) return target;
   return { ...target,
-    time: src.time != null ? src.time : target.time,
     place: src.place != null ? src.place : target.place,
     absentees: src.absentees != null ? src.absentees : "",
     planDay: src.planDay != null ? src.planDay : "",
@@ -423,7 +423,7 @@ function newRecord(type, settings){
   };
   if(type==="briefing"){
     return { ...base,
-      date: todayStr(), time: settings.defaultTime||"08:35 ~ 08:40",
+      date: todayStr(), time: BRIEFING_TIME,
       place: settings.places[0]||"FE", writer: settings.writers[0]||"", absentees:"",
       planDay:"", planNight:"",
       notices:[...(settings.notices||DEFAULT_NOTICES)],
@@ -1741,7 +1741,7 @@ function BriefingFields({r, set, setR, settings, onLoadRecent, hasRecent, recent
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <Field label="일자"><input type="date" className={inputCls} value={r.date} onChange={e=>set({date:e.target.value})}/></Field>
-          <Field label="시간"><input className={inputCls} value={r.time} onChange={e=>set({time:e.target.value})}/></Field>
+          <Field label="시간"><div className={inputCls+" flex items-center text-slate-500 bg-slate-50"}>{BRIEFING_TIME}</div></Field>
           <Field label="장소">
             <select className={inputCls} value={r.place} onChange={e=>set({place:e.target.value})}>
               {uniq([...(settings.places||[]), r.place].filter(Boolean)).map(p=> <option key={p} value={p}>{p}</option>)}
@@ -1879,7 +1879,7 @@ function buildApprovalListMail(recs, toName){
 
   const rowsOf = (r)=>{
     const m = TYPE_META[r.type];
-    if(r.type==="briefing") return [["일자",fmtDate(r.date)],["시간",r.time||"-"],["장소",r.place||"-"],["작성자",r.writer||"-"]];
+    if(r.type==="briefing") return [["일자",fmtDate(r.date)],["시간",BRIEFING_TIME],["장소",r.place||"-"],["작성자",r.writer||"-"]];
     if(r.type==="dock") return [["점검표",m.label],["라인",r.line||"-"],["품명",r.name||"-"],["생산품번",r.part||"-"],["Batch No",r.batchNo||"-"],["검사일",r.checkDate?fmtDate(r.checkDate):"-"],["검사수량",r.samplingSize||"-"],["생산수량",r.batchSize||"-"],["Shift Leader",r.shiftLeader||"-"]];
     return [["점검표",m.label],["라인",r.line||"-"],["품명",r.name||"-"],["생산품번",r.part||"-"],["Lot",r.lot||"-"],["생산일자",r.prodDate?fmtDate(r.prodDate):"-"],["생산기종",r.model||"-"],["Shift Leader",r.shiftLeader||"-"]];
   };
@@ -2301,7 +2301,7 @@ function ListEditor({title, hint, items, onChange}){
 function PeopleSettings({settings, setSettings}){
   return (
     <div className="space-y-3">
-      <ListEditor title="작성자 / 담당" hint="조회일지 작성자, 점검표 Shift Leader, 결재 1단계(담당)에 사용됩니다." items={settings.writers} onChange={v=>setSettings(p=>({...p,writers:v}))}/>
+      <ListEditor title="작성자" hint="조회일지 작성자 · 점검표 Shift Leader에 사용됩니다." items={settings.writers} onChange={v=>setSettings(p=>({...p,writers:v}))}/>
       <ListEditor title="승인자" hint="결재 승인에 사용됩니다." items={settings.managers} onChange={v=>setSettings(p=>({...p,managers:v}))}/>
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="font-bold text-slate-700">기본 결재선</div>
@@ -2423,9 +2423,6 @@ function BriefingSettings({settings, setSettings}){
       <ListEditor title="장소" items={settings.places} onChange={v=>setSettings(p=>({...p,places:v}))}/>
       <ListEditor title="전달사항 구분(라인/공정)" hint="조회일지 전달사항 행의 구분 드롭다운입니다." items={settings.deliveryCats} onChange={v=>setSettings(p=>({...p,deliveryCats:v}))}/>
       <ListEditor title="조회내용 기본 안내문구" hint="새 조회일지 작성 시 자동으로 채워지는 공통 안내사항입니다." items={settings.notices} onChange={v=>setSettings(p=>({...p,notices:v}))}/>
-      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-        <Field label="기본 시간"><input className={inputCls} value={settings.defaultTime} onChange={e=>setSettings(p=>({...p,defaultTime:e.target.value}))}/></Field>
-      </div>
     </div>
   );
 }
@@ -2604,7 +2601,7 @@ function PrintBriefing({r}){
             <td className="cell" style={{width:"12%", background:"#f3f4f6", fontWeight:700}}>일 자</td>
             <td className="cell" style={{width:"38%"}}>{fmtDate(r.date)}</td>
             <td className="cell" style={{width:"12%", background:"#f3f4f6", fontWeight:700}}>시 간</td>
-            <td className="cell">{r.time}</td>
+            <td className="cell">{BRIEFING_TIME}</td>
           </tr>
           <tr>
             <td className="cell" style={{background:"#f3f4f6", fontWeight:700}}>장 소</td>
