@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V056";
+const APP_VERSION = "V058";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -606,8 +606,10 @@ function App(){
   useEffect(()=>{ planRef.current = planData; }, [planData]);
 
   const applyPlanRows = useCallback((rows, file, uploadedAt, source, maps)=>{
+    const icvAssign = (maps&&maps.icvAssign)||[];
+    rows = splitIcvRows(rows, icvAssign);   // "New ICV / Old ICV" → 인원편성 배정대로 New/Old 분리
     setPlanData({rows, file:file||"", uploadedAt:uploadedAt||nowStr(), source:source||"",
-      revMap:(maps&&maps.revMap)||{}, lineCodes:(maps&&maps.lineCodes)||{}});
+      revMap:(maps&&maps.revMap)||{}, lineCodes:(maps&&maps.lineCodes)||{}, icvAssign});
     // 품목 마스터(라인/품명/품번)도 같은 데이터에서 생성 → 계획·작성 드롭다운이 항상 일치
     const m = masterFromPlanRows(rows);
     setSettings(prev=>({...prev, lines:m.lines, items:m.items, masterSource:"plan", masterLoadedAt:nowStr()}));
@@ -623,7 +625,7 @@ function App(){
       const cur = planRef.current||{};
       const shouldApply = manual || !(cur.rows&&cur.rows.length) || (remoteAt && remoteAt > (cur.uploadedAt||""));
       if(shouldApply){
-        const m = applyPlanRows(r.raw.rows, r.raw.file||"(Report)", remoteAt, "report", {revMap:r.raw.revMap, lineCodes:r.raw.lineCodes});
+        const m = applyPlanRows(r.raw.rows, r.raw.file||"(Report)", remoteAt, "report", {revMap:r.raw.revMap, lineCodes:r.raw.lineCodes, icvAssign:r.raw.icvAssign});
         setReportSync({state:"ok", msg:`Report 연동됨 · 라인 ${m.lines.length} · 품명 ${m.items.length}`});
       } else {
         setReportSync({state:"ok", msg:"로컬 계획이 최신"});
@@ -639,7 +641,7 @@ function App(){
       const wb = XLSX.read(rd.result, {type:"array"});
       const r = parsePlanExcel(wb);
       if(!r.ok){ alert(r.err||"계획 파일을 해석하지 못했습니다."); return; }
-      const m = applyPlanRows(r.rows, file.name, nowStr(), "upload", extractLotMaps(wb));
+      const m = applyPlanRows(r.rows, file.name, nowStr(), "upload", {...extractLotMaps(wb), icvAssign:parseIcvAssignCl(wb)});
       alert(`생산계획 ${r.rows.length}건 불러옴 (${r.sheet} 시트)\n품목 마스터 갱신: 라인 ${m.lines.length} · 품명 ${m.items.length}`);
     }catch(e){ alert("파일을 읽지 못했습니다: "+e); } };
     rd.readAsArrayBuffer(file);
@@ -1834,6 +1836,31 @@ function recTitle(r){ return r.type==="briefing" ? `조회일지 · ${fmtDate(r.
 function normPno(s){ return String(s||"").toUpperCase().replace(/[\s\-_./]/g,""); }
 function samePno(a,b){ const x=normPno(a), y=normPno(b); return !!x && x===y; }
 function normLine(s){ return String(s||"").toUpperCase().replace(/[\s\-_./]/g,""); }
+// "New ICV / Old ICV" 합쳐진 계획 행을 New ICV / Old ICV로 분리.
+// icvAssign(인원편성 기반 "품번|날짜|라인|주야" 키)이 있으면 실제 인원 배정된 조합만 생성.
+function splitIcvRows(rows, icvAssign){
+  if(!Array.isArray(rows)) return rows;
+  const keys = (icvAssign instanceof Set) ? icvAssign : new Set(icvAssign||[]);
+  const useAssign = keys.size>0;
+  const has = (pno,date,line,shift)=> keys.has(`${normPno(pno)}|${date}|${line}|${shift}`);
+  const out=[];
+  rows.forEach(r=>{
+    const ln = normLine(r.line);
+    if(ln.includes("NEWICV") && ln.includes("OLDICV")){
+      if(useAssign){
+        const n = has(r.pno, r.date, "New ICV", r.shift);
+        const o = has(r.pno, r.date, "Old ICV", r.shift);
+        if(n) out.push({...r, line:"New ICV"});
+        if(o) out.push({...r, line:"Old ICV"});
+        if(!n && !o){ out.push({...r, line:"New ICV"}); out.push({...r, line:"Old ICV"}); }  // 정보없으면 안전상 둘다
+      } else {
+        out.push({...r, line:"New ICV"});
+        out.push({...r, line:"Old ICV"});
+      }
+    } else out.push(r);
+  });
+  return out;
+}
 
 /* 계획 엑셀에서 LOT 자동계산용 맵 추출: 모품목(품번→REV) + 오라클바코드출력용(라인명→라인코드) */
 function extractLotMaps(wb){
@@ -1856,6 +1883,28 @@ function extractLotMaps(wb){
     }
   }catch(e){}
   return {revMap, lineCodes};
+}
+
+/* 점검표 직접업로드용: 인원편성 시트에서 ICV New/Old × 주야 인원>0 키 (점검표 날짜포맷 사용) */
+function parseIcvAssignCl(wb){
+  const ws = wb.Sheets["인원편성"];
+  if(!ws || !ws["!ref"]) return [];
+  const rg = XLSX.utils.decode_range(ws["!ref"]);
+  const gc = (r,c)=>{ const x=ws[XLSX.utils.encode_cell({r,c})]; return x?x.v:undefined; };
+  let hdrRow=4, best=-1;
+  for(let r=0;r<=10;r++){ let cnt=0; for(let c=0;c<=rg.e.c;c++){ const v=gc(r,c); if(typeof v==="number"&&v>40000) cnt++; } if(cnt>best){best=cnt;hdrRow=r;} }
+  const dateCols={};
+  for(let c=0;c<=rg.e.c;c++){ const v=gc(hdrRow,c); const ds=excelSerialToDateStr(v); if(ds) dateCols[c]=ds; }
+  const keys=new Set();
+  for(let r=0;r<=rg.e.r;r++){
+    const g=String(gc(r,6)||"").trim();
+    if(g!=="New ICV" && g!=="Old ICV") continue;
+    const m=String(gc(r,12)||"").trim();
+    let shift=null; if(m==="주간인원") shift="주간"; else if(m==="야간인원") shift="야간"; else continue;
+    const pno=normPno(gc(r,8)); if(!pno) continue;
+    for(const c in dateCols){ const v=gc(r,parseInt(c)); if(typeof v==="number"&&v>0) keys.add(`${pno}|${dateCols[c]}|${g}|${shift}`); }
+  }
+  return Array.from(keys);
 }
 
 /* LOT(JOB Number) 자동계산 — 엑셀 '오라클 바코드출력용' 규칙 그대로:
