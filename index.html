@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V063";
+const APP_VERSION = "V064";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -611,14 +611,22 @@ function App(){
       const shouldApply = manual || !(cur.rows&&cur.rows.length) || (remoteAt && remoteAt > (cur.uploadedAt||""));
       if(shouldApply){
         const m = applyPlanRows(r.raw.rows, r.raw.file||"(Report)", remoteAt, "report", {revMap:r.raw.revMap, lineCodes:r.raw.lineCodes, icvAssign:r.raw.icvAssign});
-        setReportSync({state:"ok", msg:`Report 연동됨 · 라인 ${m.lines.length} · 품명 ${m.items.length}`});
+        setReportSync({state:"ok", msg:`연동됨 · ${r.file||""} · 라인 ${m.lines.length}`});
       } else {
-        setReportSync({state:"ok", msg:"로컬 계획이 최신"});
+        setReportSync({state:"ok", msg:`로컬이 최신 (보고:${r.file||""})`});
       }
     } else {
       setReportSync({state:"err", msg:r.err||"가져오기 실패"});
     }
   }, [applyPlanRows]);
+
+  // 캐시 통째로 비우고 보고에서 강제로 다시 받기 (끈질긴 옛 캐시 제거용)
+  const hardRefreshReport = useCallback(async()=>{
+    try{ localStorage.removeItem(LS_PLAN); }catch(e){}
+    try{ await idbSet(LS_PLAN, null); }catch(e){}
+    setPlanData({rows:[], file:"", uploadedAt:"", source:"", revMap:{}, lineCodes:{}, icvAssign:[]});
+    await loadReportPlan(true);
+  }, [loadReportPlan]);
 
   const uploadPlanFile = useCallback((file)=>{
     const rd=new FileReader();
@@ -866,7 +874,7 @@ function App(){
         {tab==="list" && <ListView records={records} onOpen={setViewing} onEdit={setEditing} onDelete={removeRec} />}
         {tab==="plan" && <PlanView records={records} settings={settings}
           planData={planData} onUploadPlan={uploadPlanFile}
-          reportSync={reportSync} onReloadReport={()=>loadReportPlan(true)}
+          reportSync={reportSync} onReloadReport={()=>loadReportPlan(true)} onHardRefresh={hardRefreshReport}
           lineFocus={lineFocus} onClearFocus={clearLineFocus}
           photos={photos} onUploadPhoto={uploadBoardPhoto} getThumb={getThumb}
           onDownloadPhoto={downloadPhoto} onDeletePhoto={deleteBoardPhoto}
@@ -1195,7 +1203,7 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLine
   );
 }
 
-function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, lineFocus, onClearFocus, photos, onUploadPhoto, getThumb, onDownloadPhoto, onDeletePhoto, onCreate, onOpen, onEdit}){
+function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onHardRefresh, lineFocus, onClearFocus, photos, onUploadPhoto, getThumb, onDownloadPhoto, onDeletePhoto, onCreate, onOpen, onEdit}){
   const [date, setDate] = useState(todayStr());
   const fileRef = useRef(null);
   const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
@@ -1383,6 +1391,8 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
           onChange={e=>{ const f=e.target.files&&e.target.files[0]; if(f&&onUploadPlan) onUploadPlan(f); e.target.value=""; }}/>
         <button onClick={()=>fileRef.current&&fileRef.current.click()}
           className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-600 text-[12px] font-bold">📂 직접 올리기</button>
+        <button onClick={()=>{ if(confirm("로컬 캐시를 비우고 보고에서 새로 받습니다.\n(저장된 계획만 초기화되며 점검표/결재는 영향 없음)")) onHardRefresh&&onHardRefresh(); }}
+          className="px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-700 text-[12px] font-bold">♻️ 캐시 비우고 새로받기</button>
         {total>0 && (
           missing>0
             ? <span className="text-[12px] font-bold text-rose-600 bg-rose-50 px-2.5 py-1.5 rounded-lg">미작성 {missing}건</span>
