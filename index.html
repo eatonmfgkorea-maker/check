@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V062";
+const APP_VERSION = "V063";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -241,74 +241,59 @@ function excelSerialToDateStr(v){
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
 }
 function parsePlanExcel(wb){
+  // 생산순서 시트 우선: 주간/야간 섹션별로 라인(B=대분류)·날짜별 품번/수량이 이미 분리됨 (New ICV / Old ICV 포함)
+  const ws = wb.Sheets["생산순서"];
+  if(ws && ws["!ref"]){
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    const cell = (r,c)=>{ const x=ws[XLSX.utils.encode_cell({r,c})]; return x?x.v:undefined; };
+    let hdrRow=-1;
+    for(let r=0;r<=12 && hdrRow<0;r++){ for(let c=0;c<=range.e.c;c++){ const v=cell(r,c); if(typeof v==="number"&&v>40000){hdrRow=r;break;} } }
+    if(hdrRow>=0){
+      const dateAt={};
+      for(let c=0;c<=range.e.c;c++){ const ds=excelSerialToDateStr(cell(hdrRow,c)); if(ds) dateAt[c]=ds; }
+      const rows=[]; let shift=null, lastLine="";
+      for(let r=0;r<=range.e.r;r++){
+        const fcell=String(cell(r,5)||"");
+        if(/주간\s*계획/.test(fcell)){ shift="주간"; lastLine=""; continue; }
+        if(/야간\s*계획/.test(fcell)){ shift="야간"; lastLine=""; continue; }
+        if(!shift) continue;
+        const bRaw=String(cell(r,1)||"").trim();
+        if(bRaw && bRaw!=="소계" && bRaw!=="ES & GP") lastLine=bRaw;
+        const line=lastLine; if(!line) continue;
+        for(const cStr in dateAt){
+          const c=parseInt(cStr), date=dateAt[c];
+          const pno=String(cell(r,c+1)||"").trim();
+          const qty=cell(r,c+3);
+          const name=String(cell(r,c)||"").trim();
+          if(pno && typeof qty==="number" && qty>0) rows.push({date,shift,line,name,pno,qty:Math.round(qty)});
+        }
+      }
+      if(rows.length) return {ok:true, rows, sheet:"생산순서"};
+    }
+  }
+  // 폴백: 계획검토(구버전) — 생산순서가 없을 때만
   const sheetNames = wb.SheetNames || [];
   const target = sheetNames.includes("계획검토") ? ["계획검토"] : sheetNames;
   for(const sn of target){
-    const ws = wb.Sheets[sn]; if(!ws || !ws["!ref"]) continue;
-    const range = XLSX.utils.decode_range(ws["!ref"]);
-    const cell = (r,c)=>{ const x=ws[XLSX.utils.encode_cell({r,c})]; return x?x.v:undefined; };
-
-    // 1) 헤더 행 찾기: 처음 10행 안에서 "품번" 텍스트가 있는 행
-    let hr=-1, pnoCol=-1, nameCol=-1, lineCol=-1, shiftCol=-1;
-    for(let r=0; r<=Math.min(9,range.e.r) && hr<0; r++){
-      for(let c=0; c<=range.e.c; c++){
-        const v=String(cell(r,c)||"");
-        if(v.indexOf("품번")>=0){ hr=r; break; }
-      }
-    }
-    if(hr>=0){
-      for(let c=0; c<=range.e.c; c++){
-        const v=String(cell(hr,c)||"");
-        if(pnoCol<0 && v.indexOf("품번")>=0) pnoCol=c;
-        else if(nameCol<0 && v.indexOf("품명")>=0) nameCol=c;
-        if(lineCol<0 && (v.indexOf("중분류")>=0 || v.indexOf("라인")>=0)) lineCol=c;
-        if(shiftCol<0 && (v.indexOf("구분2")>=0)) shiftCol=c;
-      }
-    }
-    // 2) 폴백: MFG Report와 동일한 고정 위치 (헤더 5행, 중분류 G열, 품명 H열, 품번 I열, 구분2 L열)
-    if(hr<0) hr=4;
-    if(lineCol<0) lineCol=6;
-    if(nameCol<0) nameCol=7;
-    if(pnoCol<0) pnoCol=8;
-    if(shiftCol<0){
-      // 데이터에서 '주간계획/야간계획' 값이 나오는 열 탐색
-      for(let c=0; c<=Math.min(20,range.e.c) && shiftCol<0; c++){
-        for(let r=hr+1; r<=Math.min(hr+40,range.e.r); r++){
-          const v=String(cell(r,c)||"").trim();
-          if(v==="주간계획"||v==="야간계획"){ shiftCol=c; break; }
-        }
-      }
-      if(shiftCol<0) shiftCol=11;
-    }
-    // 3) 날짜 열: 헤더 행에서 엑셀 직렬값(>40000)
+    const ws2 = wb.Sheets[sn]; if(!ws2 || !ws2["!ref"]) continue;
+    const range = XLSX.utils.decode_range(ws2["!ref"]);
+    const cell = (r,c)=>{ const x=ws2[XLSX.utils.encode_cell({r,c})]; return x?x.v:undefined; };
+    let hr=4, lineCol=6, nameCol=7, pnoCol=8, shiftCol=11;
     const dateCols={};
-    for(let c=0; c<=range.e.c; c++){
-      const ds=excelSerialToDateStr(cell(hr,c));
-      if(ds) dateCols[c]=ds;
-    }
-    if(Object.keys(dateCols).length===0) continue;   // 이 시트엔 날짜 헤더 없음 → 다음 시트
-
-    // 4) 데이터 행 수집
+    for(let c=0; c<=range.e.c; c++){ const ds=excelSerialToDateStr(cell(hr,c)); if(ds) dateCols[c]=ds; }
+    if(Object.keys(dateCols).length===0) continue;
     const rows=[];
     for(let r=hr+1; r<=range.e.r; r++){
       const g=String(cell(r,shiftCol)||"").trim();
-      let shift=null;
-      if(g.indexOf("주간")>=0) shift="주간";
-      else if(g.indexOf("야간")>=0) shift="야간";
-      else continue;
-      const pno=String(cell(r,pnoCol)||"").trim();
-      if(!pno) continue;
+      let shift=null; if(g.indexOf("주간")>=0) shift="주간"; else if(g.indexOf("야간")>=0) shift="야간"; else continue;
+      const pno=String(cell(r,pnoCol)||"").trim(); if(!pno) continue;
       const name=String(cell(r,nameCol)||"").trim();
-      let line=lineCol>=0 ? String(cell(r,lineCol)||"").trim() : "";
-      if(line==="-") line="";
-      Object.entries(dateCols).forEach(([c,date])=>{
-        const q=cell(r,parseInt(c));
-        if(typeof q==="number" && q>0){ const qi=Math.round(q); if(qi>0) rows.push({date, shift, line, name, pno, qty:qi}); }
-      });
+      let line=String(cell(r,lineCol)||"").trim(); if(line==="-") line="";
+      Object.entries(dateCols).forEach(([c,date])=>{ const q=cell(r,parseInt(c)); if(typeof q==="number"&&q>0){ const qi=Math.round(q); if(qi>0) rows.push({date,shift,line,name,pno,qty:qi}); } });
     }
     if(rows.length) return {ok:true, rows, sheet:sn};
   }
-  return {ok:false, err:"계획 시트를 해석하지 못했습니다 (날짜 헤더/품번 열을 찾지 못함)"};
+  return {ok:false, err:"계획 시트를 해석하지 못했습니다 (생산순서/계획검토 모두 실패)"};
 }
 
 function defaultSettings(){
@@ -748,7 +733,7 @@ function App(){
       }
       loadedRef.current = true;
       // Production 보고에서 생산계획 원본 자동 가져오기 (로컬/Drive 복원 후, 더 최신일 때만 교체)
-      loadReportPlan();
+      loadReportPlan(true);   // 켤 때마다 보고(최신) 강제 반영
     })();
   // eslint-disable-next-line
   }, []);
