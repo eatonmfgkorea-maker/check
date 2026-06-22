@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V065";
+const APP_VERSION = "V066";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -1224,7 +1224,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     const m=new Map();
     planData.rows.forEach(row=>{
       if(row.date!==date) return;
-      const k=row.shift+"|"+row.pno;
+      const k=row.shift+"|"+(row.line||"")+"|"+row.pno;   // 라인+품번 단위 (New ICV/Old ICV 분리 유지)
       if(!m.has(k)) m.set(k,{shift:row.shift, pno:row.pno, name:row.name||"", line:row.line||"", qty:0});
       const e=m.get(k); e.qty+=(row.qty||0);
       if(!e.name && row.name) e.name=row.name;
