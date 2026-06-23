@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V066";
+const APP_VERSION = "V067";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -741,7 +741,7 @@ function App(){
       }
       loadedRef.current = true;
       // Production 보고에서 생산계획 원본 자동 가져오기 (로컬/Drive 복원 후, 더 최신일 때만 교체)
-      loadReportPlan(true);   // 켤 때마다 보고(최신) 강제 반영
+      loadReportPlan(false);  // 마운트: 보고가 캐시보다 '더 최신일 때만' 반영 (직접 올린 월 계획 유지)
     })();
   // eslint-disable-next-line
   }, []);
