@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V068";
+const APP_VERSION = "V069";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -86,6 +86,7 @@ const REPORT_GAS_URL = "https://script.google.com/macros/s/AKfycbxLFrxbAaBt1bBa3
 const LS_RECORDS  = "mfg_cl_records_v1";
 const LS_SETTINGS = "mfg_cl_settings_v1";
 const LS_PLAN     = "mfg_cl_plan_v1";
+const LS_PLAN_SYNC= "mfg_cl_plan_synced_at";
 const IDB_NAME = "mfg_cl_db", IDB_STORE = "kv";
 
 // 초기 품목 기본값 (생산계획 엑셀을 올리면 그걸로 대체됨)
@@ -606,6 +607,7 @@ function App(){
     setReportSync({state:"loading", msg:"Report에서 가져오는 중…"});
     const r = await fetchReportPlanRaw();
     if(r.ok){
+      try{ localStorage.setItem(LS_PLAN_SYNC, String(Date.now())); }catch(e){}
       const remoteAt = r.raw.uploadedAt||"";
       const cur = planRef.current||{};
       const shouldApply = manual || !(cur.rows&&cur.rows.length) || (remoteAt && remoteAt > (cur.uploadedAt||""));
@@ -740,8 +742,15 @@ function App(){
         } else setSync({state: r.off?"local":"err", msg: r.off?"":"동기화 실패"});
       }
       loadedRef.current = true;
-      // Production 보고에서 생산계획 원본 자동 가져오기 (로컬/Drive 복원 후, 더 최신일 때만 교체)
-      loadReportPlan(false);  // 마운트: 보고가 캐시보다 '더 최신일 때만' 반영 (직접 올린 월 계획 유지)
+      // Production 보고에서 생산계획 원본 자동 가져오기 — 최근에 받았으면 네트워크 생략(캐시 즉시 사용, QR 반복 스캔 대응)
+      (()=>{
+        const cur = planRef.current||{};
+        const hasCached = !!(cur.rows && cur.rows.length);
+        let syncedAt = 0; try{ syncedAt = parseInt(localStorage.getItem(LS_PLAN_SYNC)||"0",10)||0; }catch(e){}
+        const fresh = hasCached && (Date.now()-syncedAt < 10*60*1000);  // 10분 이내면 생략
+        if(fresh){ setReportSync({state:"ok", msg:"연동됨 (캐시)"}); return; }
+        loadReportPlan(false);  // 보고가 캐시보다 '더 최신일 때만' 반영
+      })();
     })();
   // eslint-disable-next-line
   }, []);
