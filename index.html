@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V067";
+const APP_VERSION = "V068";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -1283,16 +1283,24 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
 
   const StatusBtn = ({type, row, optional})=>{
     const rec = recOf(type, row);
-    if(!rec) return (
+    if(!rec){
+      if(!lineFocus) return (
+        <div title="라인 QR을 스캔하면 작성할 수 있습니다"
+          className="w-full px-1 py-1.5 rounded-lg border-2 border-dashed border-slate-200 text-slate-300 text-[11px] font-bold whitespace-nowrap text-center">🔒</div>
+      );
+      return (
       <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date, shift:row.shift})}
         className={`w-full px-1 py-1.5 rounded-lg border-2 border-dashed text-[11px] font-bold whitespace-nowrap ${optional
           ? "border-slate-200 text-slate-300 hover:border-slate-400 hover:text-slate-500"
           : "border-slate-300 text-slate-400 hover:border-slate-500 hover:text-slate-600"}`}>
         {optional?"선택":"+ 작성"}
       </button>
-    );
+      );
+    }
     if(rec.status==="draft") return (
-      <button onClick={()=>onEdit(rec)} className="w-full px-1 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-bold border border-amber-200 whitespace-nowrap">임시저장</button>
+      lineFocus
+        ? <button onClick={()=>onEdit(rec)} className="w-full px-1 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-bold border border-amber-200 whitespace-nowrap">임시저장</button>
+        : <button onClick={()=>onOpen(rec)} className="w-full px-1 py-1.5 rounded-lg bg-amber-50 text-amber-600 text-[11px] font-bold border border-amber-200 whitespace-nowrap">임시저장</button>
     );
     if(rec.status==="pending") return (
       <button onClick={()=>onOpen(rec)} className="w-full px-1 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-[11px] font-bold border border-sky-200 whitespace-nowrap">결재중</button>
@@ -1471,10 +1479,20 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
         <div className="rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 flex items-center gap-2">
           <span className="text-[15px]">📍</span>
           <div>
-            <div className="text-[13.5px] font-extrabold text-indigo-800">{focusName||lineFocus} 라인 모드</div>
+            <div className="text-[13.5px] font-extrabold text-indigo-800">{focusName||lineFocus} 라인 모드 <span className="text-emerald-600">· ✍️ 작성 가능</span></div>
             <div className="text-[11px] text-indigo-400">{fmtDate(date)} · 이 라인 품목만 표시 (현재 {curShift})</div>
           </div>
           <button onClick={onClearFocus} className="ml-auto px-3 py-1.5 rounded-lg bg-white border border-indigo-200 text-indigo-600 text-[12px] font-bold">전체 보기</button>
+        </div>
+      )}
+
+      {!lineFocus && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 flex items-center gap-2">
+          <span className="text-[15px]">🔒</span>
+          <div>
+            <div className="text-[13px] font-extrabold text-amber-800">조회 전용 모드</div>
+            <div className="text-[11px] text-amber-600">작성(Start Up·Dock Audit·초도)은 해당 라인 QR을 스캔해야 가능합니다 · 조회/현황판 사진은 가능</div>
+          </div>
         </div>
       )}
 
