@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V069";
+const APP_VERSION = "V070";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -1227,6 +1227,14 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     return f || lineFocus;
   }, [lineFocus, planData]);
 
+  // 매칭: 품번(정규화) + 날짜(행별 rdate) + 주야
+  const recOf = (type, row)=> records.find(r=> r.type===type && samePno(r.part, row.pno) &&
+    fmtDate(type==="dock" ? (r.checkDate||r.prodDate||r.createdAt) : (r.prodDate||r.createdAt)) === (row.rdate||date) &&
+    (!r.shift || r.shift===row.shift));
+
+  // 순서: Start Up → Dock Audit → 초도양산(선택). 미작성 카운트는 필수 항목만.
+  const CL_TYPES = [["startup","Start Up",true],["dock","Dock Audit",true],["first","초도양산",false]];
+
   // 선택 날짜 행 (엑셀 그대로) — 주/야·품번 단위로 합산
   const allRows = useMemo(()=>{
     if(!hasPlan) return [];
@@ -1234,7 +1242,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     planData.rows.forEach(row=>{
       if(row.date!==date) return;
       const k=row.shift+"|"+(row.line||"")+"|"+row.pno;   // 라인+품번 단위 (New ICV/Old ICV 분리 유지)
-      if(!m.has(k)) m.set(k,{shift:row.shift, pno:row.pno, name:row.name||"", line:row.line||"", qty:0});
+      if(!m.has(k)) m.set(k,{shift:row.shift, pno:row.pno, name:row.name||"", line:row.line||"", qty:0, rdate:date});
       const e=m.get(k); e.qty+=(row.qty||0);
       if(!e.name && row.name) e.name=row.name;
       if(!e.line && row.line) e.line=row.line;
@@ -1244,6 +1252,26 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     return arr;
   }, [planData, date, hasPlan, lineFocus, focusName]);
 
+  // 이월 야간: QR(라인) 모드에서 오늘 이전 '가장 최근 날짜'의 야간 미작성분 (금욜 야간→월욜 아침 대응)
+  const carryRows = useMemo(()=>{
+    if(!lineFocus || !hasPlan) return [];
+    const fn = normLine(focusName);
+    const nights = planData.rows.filter(r=> r.shift==="야간" && normLine(r.line)===fn && String(r.date) < date);
+    if(!nights.length) return [];
+    const latest = nights.reduce((mx,r)=> (String(r.date)>mx? String(r.date): mx), "");
+    const m=new Map();
+    planData.rows.forEach(row=>{
+      if(String(row.date)!==latest || row.shift!=="야간" || normLine(row.line)!==fn) return;
+      const k=(row.line||"")+"|"+row.pno;
+      if(!m.has(k)) m.set(k,{shift:"야간", pno:row.pno, name:row.name||"", line:row.line||"", qty:0, rdate:latest});
+      const e=m.get(k); e.qty+=(row.qty||0);
+      if(!e.name && row.name) e.name=row.name;
+    });
+    let arr=[...m.values()];
+    arr = arr.filter(row=> CL_TYPES.some(([t,,req])=> req && !recOf(t,row)));  // 이미 다 작성됐으면 숨김
+    return arr;
+  }, [planData, date, hasPlan, lineFocus, focusName, records]);
+
   const bySect = useMemo(()=>{
     const sect = {"주간":[], "야간":[]};
     allRows.forEach(r=>{ (sect[r.shift]||(sect[r.shift]=[])).push(r); });
@@ -1252,14 +1280,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   }, [allRows]);
   const total = allRows.length;
 
-  // 매칭: 품번(정규화) + 날짜 + 주야 — 마스터도 같은 엑셀에서 만들어지므로 이걸로 충분
-  const recOf = (type, row)=> records.find(r=> r.type===type && samePno(r.part, row.pno) &&
-    fmtDate(type==="dock" ? (r.checkDate||r.prodDate||r.createdAt) : (r.prodDate||r.createdAt)) === date &&
-    (!r.shift || r.shift===row.shift));
-
-  // 순서: Start Up → Dock Audit → 초도양산(선택). 미작성 카운트는 필수 항목만.
-  const CL_TYPES = [["startup","Start Up",true],["dock","Dock Audit",true],["first","초도양산",false]];
-  const missing = useMemo(()=> allRows.reduce((s,row)=> s + CL_TYPES.filter(([t,,req])=>req && !recOf(t,row)).length, 0), [allRows, records, date]);
+  const missing = useMemo(()=> [...allRows, ...carryRows].reduce((s,row)=> s + CL_TYPES.filter(([t,,req])=>req && !recOf(t,row)).length, 0), [allRows, carryRows, records, date]);
 
   // QR 라인 모드 자동 동작: 현재 시간대(06~18시 주간, 그외 야간) 기준
   const curShift = (new Date().getHours()>=6 && new Date().getHours()<18) ? "주간" : "야간";
@@ -1275,20 +1296,21 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
     const ready = hasPlan || (reportSync && (reportSync.state==="ok" || reportSync.state==="err"));
     if(!ready) return;
     autoRef.current = true;
-    if(allRows.length===0){
-      // 오늘 이 라인 계획 없음 → Start Up / Dock Audit 선택 팝업
+    if(allRows.length===0 && carryRows.length===0){
+      // 오늘도 이전 야간도 없음 → Start Up / Dock Audit 선택 팝업
       setNoPlanAsk(true);
       return;
     }
-    // 계획 있음 → Start Up / Dock Audit 선택 패널 (상태 표시 포함)
+    // 계획(또는 이전 야간 미작성) 있음 → 선택 패널
     setLineAsk(true);
-  }, [lineFocus, hasPlan, reportSync, allRows]);
+  }, [lineFocus, hasPlan, reportSync, allRows, carryRows]);
 
-  // 선택 패널에 보여줄 품목: 현재 시간대 우선, 없으면 오늘 전체
+  // 선택 패널에 보여줄 품목: 이전 야간 미작성 + 현재 시간대 우선(없으면 오늘 전체)
   const askRows = useMemo(()=>{
     const s = allRows.filter(r=>r.shift===curShift);
-    return s.length ? s : allRows;
-  }, [allRows, curShift]);
+    const today = s.length ? s : allRows;
+    return [...carryRows, ...today];
+  }, [allRows, carryRows, curShift]);
 
   const StatusBtn = ({type, row, optional})=>{
     const rec = recOf(type, row);
@@ -1298,7 +1320,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
           className="w-full px-1 py-1.5 rounded-lg border-2 border-dashed border-slate-200 text-slate-300 text-[11px] font-bold whitespace-nowrap text-center">🔒</div>
       );
       return (
-      <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date, shift:row.shift})}
+      <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date: row.rdate||date, shift:row.shift})}
         className={`w-full px-1 py-1.5 rounded-lg border-2 border-dashed text-[11px] font-bold whitespace-nowrap ${optional
           ? "border-slate-200 text-slate-300 hover:border-slate-400 hover:text-slate-500"
           : "border-slate-300 text-slate-400 hover:border-slate-500 hover:text-slate-600"}`}>
@@ -1523,7 +1545,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
         </div>
       )}
 
-      {hasPlan && total===0 && (
+      {hasPlan && total===0 && carryRows.length===0 && (
         <div className="text-center text-slate-400 py-14 text-[14px]">{fmtDate(date)} 기준 {lineFocus?`[${focusName||lineFocus}] 라인의 `:""}생산계획이 없습니다.</div>
       )}
 
@@ -1532,6 +1554,15 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
           <SectTable title="🌞 주간" rows={bySect["주간"]||[]} accent="#0369a1"/>
           <SectTable title="🌙 야간" rows={bySect["야간"]||[]} accent="#334155"/>
         </>
+      )}
+
+      {carryRows.length>0 && (
+        <div className="rounded-2xl border-2 border-purple-200 bg-purple-50 p-2">
+          <div className="px-2 py-1.5 text-[12px] font-bold text-purple-700 flex items-center gap-1.5">
+            ⏮️ 이전 야간 미작성 · {fmtDate(carryRows[0].rdate)} <span className="text-purple-400 font-semibold">(전날 야간 작성용)</span>
+          </div>
+          <SectTable title="🌙 이전 야간" rows={carryRows} accent="#7e22ce"/>
+        </div>
       )}
 
       <p className="text-[11px] text-slate-400">※ Production 보고에 올린 FE 생산계획 원본을 그대로 가져와 표시하며, 작성 드롭다운(품목 목록)도 같은 데이터로 자동 생성됩니다 — 따로 관리할 게 없습니다.</p>
