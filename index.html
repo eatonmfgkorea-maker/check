@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V070";
+const APP_VERSION = "V071";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -1342,12 +1342,12 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   };
 
   // 현황판 사진: 라인+날짜+주야당 1장
-  const photoOf = (row)=> (photos&&photos.list||[]).find(p=> p.date===date && p.shift===row.shift && normLine(p.line)===normLine(row.line));
+  const photoOf = (row)=> (photos&&photos.list||[]).find(p=> p.date===(row.rdate||date) && p.shift===row.shift && normLine(p.line)===normLine(row.line));
   const boardInputRef = useRef(null);
   const boardMetaRef = useRef(null);
   const [boardBusy, setBoardBusy] = useState("");      // "라인|주야" 업로드중 표시
   const [boardViewer, setBoardViewer] = useState(null); // 사진 미리보기 대상
-  const pickBoardPhoto = (row)=>{ boardMetaRef.current={line:row.line, date, shift:row.shift}; boardInputRef.current && boardInputRef.current.click(); };
+  const pickBoardPhoto = (row)=>{ boardMetaRef.current={line:row.line, date: row.rdate||date, shift:row.shift}; boardInputRef.current && boardInputRef.current.click(); };
   const onBoardFile = async(e)=>{
     const f = e.target.files && e.target.files[0]; e.target.value="";
     const meta = boardMetaRef.current; if(!f || !meta) return;
@@ -1454,9 +1454,10 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
             <div className="text-[16px] font-extrabold text-slate-800">📍 {focusName||lineFocus}</div>
             <div className="text-[12px] text-slate-400 mt-0.5">{fmtDate(date)} · 현재 {curShift} · 작성할 점검표를 선택하세요</div>
             {askRows.map(row=>(
-              <div key={row.shift+row.pno} className="mt-4 border border-slate-200 rounded-xl p-3">
+              <div key={row.shift+row.pno+(row.rdate||"")} className={`mt-4 border rounded-xl p-3 ${row.rdate && row.rdate!==date ? "border-purple-300 bg-purple-50" : "border-slate-200"}`}>
                 <div className="font-bold text-slate-800 text-[14.5px]">{row.name||"-"}
                   <span className="ml-1.5 text-[11px] text-slate-400 font-semibold">{row.pno}{row.shift!==curShift?` · ${row.shift}`:""}</span>
+                  {row.rdate && row.rdate!==date && <span className="ml-1.5 text-[11px] text-purple-600 font-bold">⏮️ {fmtDate(row.rdate)} 야간</span>}
                 </div>
                 <div className="grid grid-cols-2 gap-2 mt-2.5">
                   {[["startup","Start Up"],["dock","Dock Audit"]].map(([t,label])=>{
@@ -1469,7 +1470,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
                     return (
                       <button key={t}
                         onClick={()=>{ setLineAsk(false);
-                          if(!rec) onCreate(t, {line:row.line, name:row.name, pno:row.pno, date, shift:row.shift});
+                          if(!rec) onCreate(t, {line:row.line, name:row.name, pno:row.pno, date: row.rdate||date, shift:row.shift});
                           else if(rec.status==="draft") onEdit(rec);
                           else onOpen(rec); }}
                         className="rounded-xl border-2 py-3 px-2 text-center bg-white" style={{borderColor:m.accent||"#cbd5e1"}}>
