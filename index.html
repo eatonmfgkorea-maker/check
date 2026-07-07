@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V072";
+const APP_VERSION = "V074";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -689,12 +689,14 @@ function App(){
         .sort((a,b)=> (b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""))[0];
       if(latest) rec = cloneBriefingContent(rec, latest);
       rec.date = p.date;
+      if(p.writer) rec.writer = p.writer;   // 선택한 작성자 자동 반영
       // 그날 생산계획(주간/야간)을 라인별 품명으로 자동 채움
       rec.planDay = briefingPlanText(planRef.current, p.date, "주간");
       rec.planNight = briefingPlanText(planRef.current, p.date, "야간");
     } else {
       rec.line = p.line||""; rec.name = p.name||""; rec.part = p.pno||""; rec.model = p.line||rec.model||"";
       rec.shift = p.shift||"";
+      if(p.writer){ rec.writer = p.writer; rec.shiftLeader = p.writer; rec.approval.s1.name = p.writer; }   // 선택한 작성자 자동 반영
       if(type==="dock") rec.checkDate = p.date; else rec.prodDate = p.date;
       // LOT 자동계산 (엑셀 오라클 바코드 규칙) — 수정 가능
       const lot = calcLot(planRef.current, {date:p.date, shift:p.shift, line:p.line, pno:p.pno});
@@ -1217,6 +1219,16 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   const fileRef = useRef(null);
   const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
 
+  // 작성자 선택 + 비번 관문 (QR 작성 시)
+  const [writerGate, setWriterGate] = useState(null);   // {type, payload} | null
+  const [gatePick, setGatePick] = useState("");
+  const [gatePw, setGatePw] = useState("");
+  const [authedWriters, setAuthedWriters] = useState(()=> new Set());
+  const reqCreate = (type, payload)=>{ setGatePick(""); setGatePw(""); setWriterGate({type, payload}); };
+  const doCreate = (name)=>{ const g=writerGate; setWriterGate(null); setGatePick(""); setGatePw(""); if(g) onCreate(g.type, {...g.payload, writer:name}); };
+  const pickWriter = (name)=>{ const pw=(settings.passwords||{})[name]; if(authedWriters.has(name)){ doCreate(name); return; } if(!pw){ alert("이 작성자는 비밀번호가 설정되어 있지 않아 작성할 수 없습니다.\n설정에서 작성자 비밀번호를 등록해야 작성이 가능합니다. (비밀번호 없이는 조회만 가능)"); return; } setGatePick(name); setGatePw(""); };
+  const tryPw = (name)=>{ const pw=(settings.passwords||{})[name]; if(hashPw(gatePw)===pw){ setAuthedWriters(prev=>{ const n=new Set(prev); n.add(name); return n; }); doCreate(name); } else { alert("비밀번호가 일치하지 않습니다."); } };
+
   // QR 라인 모드: 라인명 또는 라인코드(AGV 등)를 실제 계획의 라인명으로 해석
   const focusName = useMemo(()=>{
     if(!lineFocus) return "";
@@ -1289,7 +1301,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   const [lineAsk, setLineAsk] = useState(false);
   const createManual = (type)=>{
     setNoPlanAsk(false);
-    onCreate(type, {line: focusName||lineFocus, name:"", pno:"", date, shift: curShift});
+    reqCreate(type, {line: focusName||lineFocus, name:"", pno:"", date, shift: curShift});
   };
   useEffect(()=>{
     if(!lineFocus || autoRef.current) return;
@@ -1320,7 +1332,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
           className="w-full px-1 py-1.5 rounded-lg border-2 border-dashed border-slate-200 text-slate-300 text-[11px] font-bold whitespace-nowrap text-center">🔒</div>
       );
       return (
-      <button onClick={()=>onCreate(type,{line:row.line, name:row.name, pno:row.pno, date: row.rdate||date, shift:row.shift})}
+      <button onClick={()=>reqCreate(type,{line:row.line, name:row.name, pno:row.pno, date: row.rdate||date, shift:row.shift})}
         className={`w-full px-1 py-1.5 rounded-lg border-2 border-dashed text-[11px] font-bold whitespace-nowrap ${optional
           ? "border-slate-200 text-slate-300 hover:border-slate-400 hover:text-slate-500"
           : "border-slate-300 text-slate-400 hover:border-slate-500 hover:text-slate-600"}`}>
@@ -1411,7 +1423,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   // 선택 날짜의 조회일지
   const brf = useMemo(()=> records.find(r=>r.type==="briefing" && fmtDate(r.date)===date), [records, date]);
   const BrfBtn = ()=>{
-    if(!brf) return <button onClick={()=>onCreate("briefing",{date})}
+    if(!brf) return <button onClick={()=>reqCreate("briefing",{date})}
       className="px-3 py-1.5 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 text-[12px] font-bold hover:border-slate-500 hover:text-slate-600">+ 작성</button>;
     if(brf.status==="draft") return <button onClick={()=>onEdit(brf)} className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[12px] font-bold border border-amber-200">임시저장 →</button>;
     if(brf.status==="pending") return <button onClick={()=>onOpen(brf)} className="px-3 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-[12px] font-bold border border-sky-200">결재중</button>;
@@ -1448,6 +1460,40 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       {boardViewer && <PhotoViewer p={boardViewer} getThumb={getThumb} onDownload={onDownloadPhoto}
         onDelete={async()=>{ await onDeletePhoto(boardViewer); setBoardViewer(null); }} onClose={()=>setBoardViewer(null)}/>}
 
+      {writerGate && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={()=>{setWriterGate(null);setGatePick("");setGatePw("");}}>
+          <div className="bg-white rounded-2xl p-5 w-full max-w-sm shadow-xl max-h-[85vh] overflow-auto" onClick={e=>e.stopPropagation()}>
+            <div className="font-extrabold text-slate-800 text-[16px]">작성자 선택</div>
+            <div className="text-[12px] text-slate-400 mt-0.5 mb-3">작성하려면 비밀번호 인증이 필요합니다. 인증 없이는 조회만 가능합니다.</div>
+            <div className="space-y-2">
+              {(settings.writers||[]).length===0 && <div className="text-[13px] text-slate-400 py-6 text-center">설정에 등록된 작성자가 없습니다.</div>}
+              {(settings.writers||[]).map(name=>{
+                const hasPw = !!(settings.passwords||{})[name];
+                const authed = authedWriters.has(name);
+                return (
+                  <div key={name}>
+                    <button onClick={()=>pickWriter(name)}
+                      className={`w-full px-3 py-2.5 rounded-xl border text-[14.5px] font-bold text-left flex items-center justify-between ${gatePick===name?"border-indigo-400 bg-indigo-50":!hasPw&&!authed?"border-slate-100 bg-slate-50 text-slate-300":"border-slate-200 hover:border-slate-400"}`}>
+                      <span>{name}</span>
+                      <span className="text-[11px] font-semibold">{authed?<span className="text-emerald-500">인증됨 ✓</span>:hasPw?<span className="text-slate-400">🔒 비번 입력</span>:<span className="text-slate-300">비번 미설정 · 작성불가</span>}</span>
+                    </button>
+                    {gatePick===name && !authed && hasPw && (
+                      <div className="flex gap-2 mt-2">
+                        <input type="password" autoFocus value={gatePw} onChange={e=>setGatePw(e.target.value)}
+                          onKeyDown={e=>{ if(e.key==="Enter") tryPw(name); }}
+                          placeholder="비밀번호" className="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-[13.5px]"/>
+                        <button onClick={()=>tryPw(name)} className="px-4 py-2 rounded-lg bg-indigo-600 text-white font-bold text-[13px] whitespace-nowrap">확인</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={()=>{setWriterGate(null);setGatePick("");setGatePw("");}} className="mt-4 w-full py-2.5 rounded-xl border border-slate-300 text-slate-500 font-bold text-[13.5px]">취소</button>
+          </div>
+        </div>
+      )}
+
       {lineAsk && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={()=>setLineAsk(false)}>
           <div className="bg-white rounded-2xl p-5 w-full max-w-md shadow-xl max-h-[85vh] overflow-auto" onClick={e=>e.stopPropagation()}>
@@ -1470,7 +1516,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
                     return (
                       <button key={t}
                         onClick={()=>{ setLineAsk(false);
-                          if(!rec) onCreate(t, {line:row.line, name:row.name, pno:row.pno, date: row.rdate||date, shift:row.shift});
+                          if(!rec) reqCreate(t, {line:row.line, name:row.name, pno:row.pno, date: row.rdate||date, shift:row.shift});
                           else if(rec.status==="draft") onEdit(rec);
                           else onOpen(rec); }}
                         className="rounded-xl border-2 py-3 px-2 text-center bg-white" style={{borderColor:m.accent||"#cbd5e1"}}>
