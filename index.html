@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V074";
+const APP_VERSION = "V075";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -886,7 +886,7 @@ function App(){
         {tab==="plan" && <PlanView records={records} settings={settings}
           planData={planData} onUploadPlan={uploadPlanFile}
           reportSync={reportSync} onReloadReport={()=>loadReportPlan(true)} onHardRefresh={hardRefreshReport}
-          lineFocus={lineFocus} onClearFocus={clearLineFocus}
+          lineFocus={lineFocus} onClearFocus={clearLineFocus} adminUnlocked={adminUnlocked}
           photos={photos} onUploadPhoto={uploadBoardPhoto} getThumb={getThumb}
           onDownloadPhoto={downloadPhoto} onDeletePhoto={deleteBoardPhoto}
           onCreate={createFromPlan} onOpen={setViewing} onEdit={setEditing} />}
@@ -1214,10 +1214,11 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLine
   );
 }
 
-function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onHardRefresh, lineFocus, onClearFocus, photos, onUploadPhoto, getThumb, onDownloadPhoto, onDeletePhoto, onCreate, onOpen, onEdit}){
+function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onHardRefresh, lineFocus, onClearFocus, adminUnlocked, photos, onUploadPhoto, getThumb, onDownloadPhoto, onDeletePhoto, onCreate, onOpen, onEdit}){
   const [date, setDate] = useState(todayStr());
   const fileRef = useRef(null);
   const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
+  const canWrite = !!lineFocus || !!adminUnlocked;   // QR 라인 모드 또는 관리자 로그인 → 작성 가능
 
   // 작성자 선택 + 비번 관문 (QR 작성 시)
   const [writerGate, setWriterGate] = useState(null);   // {type, payload} | null
@@ -1226,7 +1227,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   const [authedWriters, setAuthedWriters] = useState(()=> new Set());
   const reqCreate = (type, payload)=>{ setGatePick(""); setGatePw(""); setWriterGate({type, payload}); };
   const doCreate = (name)=>{ const g=writerGate; setWriterGate(null); setGatePick(""); setGatePw(""); if(g) onCreate(g.type, {...g.payload, writer:name}); };
-  const pickWriter = (name)=>{ const pw=(settings.passwords||{})[name]; if(authedWriters.has(name)){ doCreate(name); return; } if(!pw){ alert("이 작성자는 비밀번호가 설정되어 있지 않아 작성할 수 없습니다.\n설정에서 작성자 비밀번호를 등록해야 작성이 가능합니다. (비밀번호 없이는 조회만 가능)"); return; } setGatePick(name); setGatePw(""); };
+  const pickWriter = (name)=>{ const pw=(settings.passwords||{})[name]; if(adminUnlocked || authedWriters.has(name)){ doCreate(name); return; } if(!pw){ alert("이 작성자는 비밀번호가 설정되어 있지 않아 작성할 수 없습니다.\n설정에서 작성자 비밀번호를 등록해야 작성이 가능합니다. (비밀번호 없이는 조회만 가능)"); return; } setGatePick(name); setGatePw(""); };
   const tryPw = (name)=>{ const pw=(settings.passwords||{})[name]; if(hashPw(gatePw)===pw){ setAuthedWriters(prev=>{ const n=new Set(prev); n.add(name); return n; }); doCreate(name); } else { alert("비밀번호가 일치하지 않습니다."); } };
 
   // QR 라인 모드: 라인명 또는 라인코드(AGV 등)를 실제 계획의 라인명으로 해석
@@ -1327,8 +1328,8 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   const StatusBtn = ({type, row, optional})=>{
     const rec = recOf(type, row);
     if(!rec){
-      if(!lineFocus) return (
-        <div title="라인 QR을 스캔하면 작성할 수 있습니다"
+      if(!canWrite) return (
+        <div title="라인 QR을 스캔하거나 설정에서 관리자 로그인하면 작성할 수 있습니다"
           className="w-full px-1 py-1.5 rounded-lg border-2 border-dashed border-slate-200 text-slate-300 text-[11px] font-bold whitespace-nowrap text-center">🔒</div>
       );
       return (
@@ -1341,7 +1342,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       );
     }
     if(rec.status==="draft") return (
-      lineFocus
+      canWrite
         ? <button onClick={()=>onEdit(rec)} className="w-full px-1 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-bold border border-amber-200 whitespace-nowrap">임시저장</button>
         : <button onClick={()=>onOpen(rec)} className="w-full px-1 py-1.5 rounded-lg bg-amber-50 text-amber-600 text-[11px] font-bold border border-amber-200 whitespace-nowrap">임시저장</button>
     );
@@ -1564,7 +1565,17 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
         </div>
       )}
 
-      {!lineFocus && (
+      {!lineFocus && adminUnlocked && (
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 flex items-center gap-2">
+          <span className="text-[15px]">🔓</span>
+          <div>
+            <div className="text-[13px] font-extrabold text-emerald-800">관리자 모드 · ✍️ 전체 작성 가능</div>
+            <div className="text-[11px] text-emerald-600">QR 없이도 모든 라인 작성 가능 · 작성자 비밀번호 없이 진행됩니다</div>
+          </div>
+        </div>
+      )}
+
+      {!lineFocus && !adminUnlocked && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 flex items-center gap-2">
           <span className="text-[15px]">🔒</span>
           <div>
