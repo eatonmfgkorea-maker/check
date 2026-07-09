@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V075";
+const APP_VERSION = "V076";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -182,8 +182,10 @@ async function fetchReportPlanRaw(){
     const listRes = await fetch(REPORT_GAS_URL + "?action=list&_=" + Date.now(), {cache:"no-store"});
     const list = await listRes.json();
     if(!list.ok || !Array.isArray(list.files)) return {ok:false, err:"목록 조회 실패"};
-    const fl = list.files.filter(f=>/mfg-settings-/i.test(f.name||"")).sort((a,b)=>(b.name||"").localeCompare(a.name||""));
-    if(fl.length===0) return {ok:false, err:"Report 백업 없음"};
+    // 1순위: 파이썬 자동 업로드 전용 파일(fe-plan-auto-*), 없으면 2순위: MFGreport 백업(mfg-settings-*)
+    let fl = list.files.filter(f=>/fe-plan-auto-/i.test(f.name||"") && !/TEST/i.test(f.name||"")).sort((a,b)=>(b.name||"").localeCompare(a.name||""));
+    if(fl.length===0){ fl = list.files.filter(f=>/mfg-settings-/i.test(f.name||"")).sort((a,b)=>(b.name||"").localeCompare(a.name||"")); }
+    if(fl.length===0) return {ok:false, err:"백업 없음"};
     const loadRes = await fetch(REPORT_GAS_URL + "?action=load&id=" + encodeURIComponent(fl[0].id) + "&_=" + Date.now(), {cache:"no-store"});
     const j = await loadRes.json();
     if(!j.ok || !j.data) return {ok:false, err:"파일 불러오기 실패"};
