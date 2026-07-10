@@ -70,12 +70,13 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V078";
+const APP_VERSION = "V079";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
 //   비워두면 이 기기(localStorage/IndexedDB)에만 저장됩니다.
 const GAS_URL = "https://script.google.com/macros/s/AKfycbx5PYLCxncWe33YZZJ8I9Xar8AHNncQxMZdoxolR0JR28DU7chKZHGWxXfmsYCjv5jF/exec";
+const TELEGRAM_RELAY_URL = "https://script.google.com/macros/s/AKfycbzmZHQ3xdwLn3tN227OW5PPIlGOBtBH6UzSt6NBvf3QcAB-vSTxqaxsF9xVvRmo3_jm/exec";
 
 // ▼ 이 앱이 배포된 주소 (결재 알림 메일의 "결재하러 가기" 링크에 사용). 실제 호스팅 주소로 맞추세요.
 const APP_URL = "https://eatonmfgkorea-maker.github.io/check/";
@@ -211,6 +212,18 @@ async function makeThumbB64(file, max){
 }
 function fileToB64(file){
   return new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>res(String(rd.result).split(",")[1]); rd.onerror=rej; rd.readAsDataURL(file); });
+}
+async function sendBoardPhotoToTelegram(file, meta){
+  if(!TELEGRAM_RELAY_URL) return;
+  try{
+    const b64 = await fileToB64(file);
+    const line = (meta && meta.line) || "현황판";
+    const cap = "📷 " + line + " 현황판\n📅 " + ((meta&&meta.date)||"") + " " + ((meta&&meta.shift)||"");
+    const ext = (file.name.match(/\.[A-Za-z0-9]+$/)||[".jpg"])[0];
+    const fname = (((meta&&meta.date)||"") + "_" + ((meta&&meta.shift)||"") + "_" + line + ext).replace(/[\\/:*?"<>|\s]+/g,"_");
+    await fetch(TELEGRAM_RELAY_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body: JSON.stringify({imageB64:b64, filename:fname, caption:cap})});
+  }catch(e){ /* 텔레그램 전송 실패는 무시 — 사진 업로드 자체엔 영향 없음 */ }
 }
 async function apiPhotoUpload(file, meta){
   if(!GAS_URL) return {ok:false, err:"GAS 미설정"};
@@ -669,7 +682,7 @@ function App(){
   }, []);
   const uploadBoardPhoto = useCallback(async(file, meta)=>{
     const r = await apiPhotoUpload(file, meta);
-    if(r && r.ok){ await loadPhotos(); return true; }
+    if(r && r.ok){ sendBoardPhotoToTelegram(file, meta); await loadPhotos(); return true; }
     alert("사진 업로드 실패: "+((r&&r.err)||"연결 오류")); return false;
   }, [loadPhotos]);
   const downloadPhoto = useCallback(async(p)=>{
