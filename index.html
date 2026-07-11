@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V079";
+const APP_VERSION = "V080";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -593,6 +593,32 @@ function App(){
   const [tab, setTab] = useState("list");          // list | new | inbox | settings
   const [editing, setEditing] = useState(null);    // record being edited (object)
   const [viewing, setViewing] = useState(null);    // record being viewed/printed (object)
+  const [newVerFound, setNewVerFound] = useState(false);   // 새 버전 감지
+  const editingRef = useRef(null), viewingRef = useRef(null);
+  useEffect(()=>{ editingRef.current = editing; }, [editing]);
+  useEffect(()=>{ viewingRef.current = viewing; }, [viewing]);
+
+  // 새 버전 자동 감지: 서버의 index.html을 캐시 무시하고 받아 APP_VERSION 비교
+  useEffect(()=>{
+    let stop=false;
+    const busy = ()=> !!(editingRef.current || viewingRef.current);
+    const checkVer = async()=>{
+      try{
+        const res = await fetch(location.pathname + "?v=" + Date.now(), {cache:"no-store"});
+        const txt = await res.text();
+        const m = txt.match(/APP_VERSION\s*=\s*"(V\d+)"/);
+        if(!m || stop) return;
+        const latest = m[1];
+        if(latest !== APP_VERSION){
+          if(busy()) setNewVerFound(true);              // 작성/조회 중이면 배너만
+          else location.reload(true);                    // 아니면 즉시 갱신
+        }
+      }catch(e){ /* 네트워크 오류 무시 */ }
+    };
+    const t0 = setTimeout(checkVer, 3000);              // 켠 뒤 3초 후 1회
+    const iv = setInterval(checkVer, 5*60*1000);        // 이후 5분마다
+    return ()=>{ stop=true; clearTimeout(t0); clearInterval(iv); };
+  }, []);
   const [sync, setSync] = useState({state: GAS_URL?"idle":"local", msg:""});
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const loadedRef = useRef(false);
@@ -871,6 +897,13 @@ function App(){
 
   return (
     <div className="min-h-screen pb-24">
+      {newVerFound && (
+        <div className="sticky top-0 z-40 bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between gap-3 no-print">
+          <div className="text-[13px] font-bold">🔄 새 버전이 있습니다. 작성 완료 후 업데이트해 주세요.</div>
+          <button onClick={()=>location.reload(true)}
+            className="px-3 py-1.5 rounded-lg bg-white text-indigo-700 text-[12px] font-extrabold whitespace-nowrap">지금 업데이트</button>
+        </div>
+      )}
       {/* 상단바 */}
       <header className="sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
