@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V080";
+const APP_VERSION = "V081";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -498,6 +498,21 @@ async function driveLoad(){
 
 function loadLocal(key, fallback){ try{ const v=localStorage.getItem(key); return v? JSON.parse(v): fallback; }catch(e){ return fallback; } }
 function saveLocal(key, val){ try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){} }
+// 결재 유실 방지: 드라이브 records와 로컬 records를 문서 단위로 병합(최신 updatedAt 우선). 한쪽에만 있는 건 유지.
+function mergeRecords(localArr, driveArr){
+  const byId = {}; let changed = false;
+  (Array.isArray(driveArr)?driveArr:[]).forEach(r=>{ if(r&&r.id) byId[r.id]=r; });
+  (Array.isArray(localArr)?localArr:[]).forEach(r=>{
+    if(!r||!r.id) return;
+    const d = byId[r.id];
+    if(!d){ byId[r.id]=r; changed=true; return; }               // 로컬에만 있음 → 유지
+    const lt = Date.parse(r.updatedAt||r.createdAt||0)||0;
+    const dt = Date.parse(d.updatedAt||d.createdAt||0)||0;
+    if(lt>dt){ byId[r.id]=r; changed=true; }                    // 로컬이 더 최신 → 로컬 유지
+  });
+  const merged = Object.values(byId).sort((a,b)=>(Date.parse(b.createdAt||0)||0)-(Date.parse(a.createdAt||0)||0));
+  return { merged, changed };
+}
 
 /* ============================================================
    작은 UI 컴포넌트
@@ -773,7 +788,7 @@ function App(){
         setSync({state:"loading", msg:"동기화 중…"});
         const r = await driveLoad();
         if(r.ok && r.data && Array.isArray(r.data.records)){
-          setRecords(r.data.records);
+          setRecords(local=>{ const mr = mergeRecords(local, r.data.records); if(mr.changed) needPushRef.current = true; return mr.merged; });
           if(r.data.settings) setSettings(mergeSettings(r.data.settings));
           if(r.data.planData && Array.isArray(r.data.planData.rows)) setPlanData(r.data.planData);
           setSync({state:"ok", msg:"동기화됨"});
@@ -791,6 +806,7 @@ function App(){
         } else setSync({state: r.off?"local":"err", msg: r.off?"":"동기화 실패"});
       }
       loadedRef.current = true;
+      if(needPushRef.current){ needPushRef.current = false; setSaveNudge(n=>n+1); }   // 못 올라갔던 결재분 복구 저장
       // Production 보고에서 생산계획 원본 자동 가져오기 — 최근에 받았으면 네트워크 생략(캐시 즉시 사용, QR 반복 스캔 대응)
       (()=>{
         const cur = planRef.current||{};
@@ -810,6 +826,7 @@ function App(){
   useEffect(()=>{ saveLocal(LS_PLAN, planData); idbSet(LS_PLAN, planData); }, [planData]);
   const [saveNudge, setSaveNudge] = useState(0);
   const retryRef = useRef(false);
+  const needPushRef = useRef(false);   // 병합으로 로컬 변경분이 생기면 드라이브에 밀어주기
   useEffect(()=>{
     if(!loadedRef.current || !GAS_URL) return;
     const h = setTimeout(async()=>{
@@ -825,10 +842,17 @@ function App(){
   }, [records, settings, planData, saveNudge]);
 
   // 액션
+  const saveNow = useCallback(async(arr)=>{   // 디바운스 안 기다리고 즉시 드라이브 저장 (결재 유실 방지)
+    if(!GAS_URL) return;
+    setSync(s=>({...s, state:"saving"}));
+    const r = await driveSave({records:arr, settings, planData, ver:APP_VERSION});
+    if(!r.ok && !retryRef.current){ retryRef.current=true; setTimeout(()=>{ retryRef.current=false; setSaveNudge(n=>n+1); }, 6000); }
+    setSync({state: r.ok?"ok":"err", msg: r.ok?"저장됨":"저장 실패"});
+  }, [settings, planData]);
   const upsert = useCallback((rec)=>{
     rec.updatedAt = nowStr();
-    setRecords(prev=>{ const i=prev.findIndex(r=>r.id===rec.id); if(i<0) return [rec,...prev]; const c=[...prev]; c[i]=rec; return c; });
-  }, []);
+    setRecords(prev=>{ const i=prev.findIndex(r=>r.id===rec.id); const next = i<0? [rec,...prev] : prev.map((x,ix)=>ix===i?rec:x); queueMicrotask(()=>saveNow(next)); return next; });
+  }, [saveNow]);
   const removeRec = useCallback((id)=>{
     const pw = prompt("문서 삭제는 관리자만 가능합니다.\n관리자 비밀번호를 입력하세요.");
     if(pw===null) return;
@@ -839,7 +863,7 @@ function App(){
 
   function approveMany(targets, opts){
     opts = opts||{};
-    setRecords(prev=>prev.map(r=>{
+    setRecords(prev=>{ const next = prev.map(r=>{
       const t = targets.find(x=>x.id===r.id);
       if(!t) return r;
       const a = { s1:{...r.approval.s1}, s2:{...r.approval.s2}, s3:{...r.approval.s3} };
@@ -854,7 +878,7 @@ function App(){
       }
       const done = a.s1.approved && a.s2.approved && a.s3.approved;
       return {...r, approval:a, comments, status: done?"done":"pending", updatedAt:nowStr()};
-    }));
+    }); queueMicrotask(()=>saveNow(next)); return next; });
   }
   const setPwForPerson = useCallback((name, hash)=>{
     setSettings(prev=>({...prev, passwords:{...(prev.passwords||{}), [name]: hash}}));
