@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V081";
+const APP_VERSION = "V082";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -605,7 +605,8 @@ function OkNg({value, onChange, disabled}){
 function App(){
   const [settings, setSettings] = useState(()=>{ const s=loadLocal(LS_SETTINGS,null); return s? mergeSettings(s) : defaultSettings(); });
   const [records, setRecords] = useState(()=>loadLocal(LS_RECORDS, []));
-  const [tab, setTab] = useState("list");          // list | new | inbox | settings
+  const [tab, setTab] = useState("list");          // list | plan | cal | board | new | inbox | settings
+  const [jumpDate, setJumpDate] = useState("");    // 달력에서 날짜 클릭 → 생산계획으로 이동
   const [editing, setEditing] = useState(null);    // record being edited (object)
   const [viewing, setViewing] = useState(null);    // record being viewed/printed (object)
   const [newVerFound, setNewVerFound] = useState(false);   // 새 버전 감지
@@ -950,7 +951,7 @@ function App(){
         </div>
         {/* 탭 */}
         <nav className="max-w-5xl mx-auto px-2 flex gap-1 overflow-x-auto">
-          {[["list","목록"],["plan","생산계획"],["board","현황판"],["new","작성"],["inbox","결재함"],["settings","설정"]].map(([k,t])=>(
+          {[["list","목록"],["plan","생산계획"],["cal","달력"],["board","현황판"],["new","작성"],["inbox","결재함"],["settings","설정"]].map(([k,t])=>(
             <button key={k} onClick={()=>setTab(k)}
               className={`px-4 py-2.5 text-[14px] font-bold whitespace-nowrap border-b-2 ${tab===k?"border-slate-900 text-slate-900":"border-transparent text-slate-400"}`}>
               {t}{k==="inbox" && pendingCount>0 && <span className="ml-1.5 text-[11px] bg-rose-500 text-white rounded-full px-1.5 py-0.5">{pendingCount}</span>}
@@ -964,10 +965,12 @@ function App(){
         {tab==="plan" && <PlanView records={records} settings={settings}
           planData={planData} onUploadPlan={uploadPlanFile}
           reportSync={reportSync} onReloadReport={()=>loadReportPlan(true)} onHardRefresh={hardRefreshReport}
-          lineFocus={lineFocus} onClearFocus={clearLineFocus} adminUnlocked={adminUnlocked}
+          lineFocus={lineFocus} onClearFocus={clearLineFocus} adminUnlocked={adminUnlocked} jumpDate={jumpDate}
           photos={photos} onUploadPhoto={uploadBoardPhoto} getThumb={getThumb}
           onDownloadPhoto={downloadPhoto} onDeletePhoto={deleteBoardPhoto}
           onCreate={createFromPlan} onOpen={setViewing} onEdit={setEditing} />}
+        {tab==="cal" && <CalendarView records={records} planData={planData} photos={photos}
+          onPickDate={(d)=>{ setJumpDate(d); setTab("plan"); }} />}
         {tab==="board" && <BoardView photos={photos} onReload={loadPhotos} getThumb={getThumb}
           onDownload={downloadPhoto} onDelete={deleteBoardPhoto}
           masterLines={settings.lines||[]} onUpload={uploadBoardPhoto} />}
@@ -1179,6 +1182,179 @@ function PhotoViewer({p, getThumb, onDownload, onDelete, onClose}){
 /* ============================================================
    현황판 탭 — 라인/날짜/주야 조회
    ============================================================ */
+/* ── 달력: 날짜별 완료 현황(Start Up · Dock Audit · 현황판) 한눈에 ── */
+function CalendarView({records, planData, photos, onPickDate}){
+  const [ym, setYm] = useState(()=> todayStr().slice(0,7));
+  const [sel, setSel] = useState("");
+  const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
+
+  const recOf = (type, row)=> records.find(r=> r.type===type && samePno(r.part, row.pno) &&
+    fmtDate(type==="dock" ? (r.checkDate||r.prodDate||r.createdAt) : (r.prodDate||r.createdAt)) === row.date &&
+    (!r.shift || r.shift===row.shift) &&
+    (!r.line || !row.line || normLine(r.line)===normLine(row.line)));
+  const photoOf = (line, date, shift)=> ((photos&&photos.list)||[])
+    .find(p=> p.date===date && p.shift===shift && normLine(p.line)===normLine(line));
+
+  // 이 달의 날짜별 계획 행 (주야·라인·품번 단위)
+  const byDate = useMemo(()=>{
+    const m = {};
+    if(!hasPlan) return m;
+    planData.rows.forEach(row=>{
+      if(!row.date || String(row.date).slice(0,7)!==ym) return;
+      const d = row.date;
+      if(!m[d]) m[d] = new Map();
+      const k = row.shift+"|"+(row.line||"")+"|"+row.pno;
+      if(!m[d].has(k)) m[d].set(k, {date:d, shift:row.shift, line:row.line||"", pno:row.pno, name:row.name||"", qty:0});
+      m[d].get(k).qty += (row.qty||0);
+    });
+    const out = {};
+    Object.keys(m).forEach(d=> out[d] = [...m[d].values()]);
+    return out;
+  }, [planData, ym, hasPlan]);
+
+  // 날짜별 완료도
+  const stat = useMemo(()=>{
+    const out = {};
+    Object.keys(byDate).forEach(d=>{
+      const rows = byDate[d];
+      let need=0, done=0;
+      rows.forEach(row=>{
+        need+=2;
+        if(recOf("startup",row)) done++;
+        if(recOf("dock",row)) done++;
+      });
+      const groups = [...new Set(rows.map(r=> (r.line||"")+"|"+r.shift))];
+      groups.forEach(g=>{
+        const i=g.lastIndexOf("|");
+        need++;
+        if(photoOf(g.slice(0,i), d, g.slice(i+1))) done++;
+      });
+      out[d] = {need, done, ok: need>0 && done>=need, lines: [...new Set(rows.map(r=>r.line))].filter(Boolean)};
+    });
+    return out;
+  }, [byDate, records, photos]);
+
+  // 선택 날짜 상세 (라인·주야별)
+  const detail = useMemo(()=>{
+    if(!sel || !byDate[sel]) return [];
+    const m = new Map();
+    byDate[sel].forEach(row=>{
+      const k = (row.line||"")+"|"+row.shift;
+      if(!m.has(k)) m.set(k, {line:row.line||"", shift:row.shift, rows:[]});
+      m.get(k).rows.push(row);
+    });
+    const arr = [...m.values()];
+    arr.forEach(g=>{
+      g.su = g.rows.every(r=> !!recOf("startup", r));
+      g.dk = g.rows.every(r=> !!recOf("dock", r));
+      g.ph = !!photoOf(g.line, sel, g.shift);
+      g.qty = g.rows.reduce((s,r)=>s+(r.qty||0),0);
+    });
+    return arr.sort((a,b)=> a.shift===b.shift ? String(a.line).localeCompare(String(b.line)) : (a.shift==="주간"?-1:1));
+  }, [sel, byDate, records, photos]);
+
+  const cells = useMemo(()=>{
+    const [y,mo] = ym.split("-").map(Number);
+    const pad = new Date(y, mo-1, 1).getDay();
+    const last = new Date(y, mo, 0).getDate();
+    const out = [];
+    for(let i=0;i<pad;i++) out.push(null);
+    for(let d=1; d<=last; d++) out.push(`${y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`);
+    return out;
+  }, [ym]);
+
+  const moveMonth = (n)=>{
+    const [y,mo] = ym.split("-").map(Number);
+    const d = new Date(y, mo-1+n, 1);
+    setYm(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`); setSel("");
+  };
+
+  const sum = useMemo(()=>{
+    const ds = Object.keys(stat);
+    return { days: ds.length, ok: ds.filter(d=>stat[d].ok).length };
+  }, [stat]);
+
+  const today = todayStr();
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+        <div className="flex items-center justify-between">
+          <button onClick={()=>moveMonth(-1)} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 font-bold text-[14px]">◀</button>
+          <div className="text-center">
+            <div className="font-extrabold text-slate-800 text-[17px]">{ym.split("-")[0]}년 {Number(ym.split("-")[1])}월</div>
+            <div className="text-[11.5px] text-slate-400 mt-0.5">생산일 {sum.days}일 중 <span className="text-emerald-600 font-bold">{sum.ok}일 완료</span></div>
+          </div>
+          <button onClick={()=>moveMonth(1)} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 font-bold text-[14px]">▶</button>
+        </div>
+        <div className="flex items-center gap-3 mt-2.5 text-[11px] text-slate-500">
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 border border-emerald-300 inline-block"/>전부 완료</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-rose-100 border border-rose-300 inline-block"/>미완료</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-slate-50 border border-slate-200 inline-block"/>계획 없음</span>
+        </div>
+      </div>
+
+      {!hasPlan && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] text-amber-700 font-bold">생산계획이 없습니다. 생산계획 탭에서 먼저 불러오세요.</div>}
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-2.5">
+        <div className="grid grid-cols-7 gap-1 mb-1">
+          {["일","월","화","수","목","금","토"].map((w,i)=>(
+            <div key={w} className={`text-center text-[11.5px] font-bold py-1 ${i===0?"text-rose-400":i===6?"text-sky-400":"text-slate-400"}`}>{w}</div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {cells.map((d,i)=>{
+            if(!d) return <div key={"e"+i} className="h-[62px]"/>;
+            const s = stat[d];
+            const dn = Number(d.slice(8));
+            const isToday = d===today;
+            const base = "h-[62px] rounded-xl border px-1.5 py-1 flex flex-col items-center justify-center transition";
+            const cls = !s ? "border-slate-200 bg-slate-50 text-slate-300"
+                      : s.ok ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                             : "border-rose-300 bg-rose-50 text-rose-700";
+            return (
+              <button key={d} onClick={()=>setSel(sel===d?"":d)}
+                className={`${base} ${cls} ${sel===d?"ring-2 ring-slate-800":""} ${isToday?"font-black":""}`}>
+                <div className={`text-[14px] leading-none ${isToday?"underline":""}`}>{dn}</div>
+                {s && <div className="text-[10px] font-bold mt-1 leading-tight">{s.done}/{s.need}</div>}
+                {s && <div className="text-[9px] mt-0.5 opacity-70 leading-tight">{s.ok?"완료":"미완"}</div>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {sel && detail.length>0 && (
+        <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+          <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+            <div className="font-extrabold text-slate-800 text-[14.5px]">{sel} 상세</div>
+            {onPickDate && <button onClick={()=>onPickDate(sel)} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[12px] font-bold">생산계획에서 보기 →</button>}
+          </div>
+          <div className="divide-y divide-slate-100">
+            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-4 py-2 text-[11px] font-bold text-slate-400">
+              <div>라인 / 주야</div><div className="w-14 text-center">Start Up</div><div className="w-14 text-center">Dock</div><div className="w-12 text-center">현황판</div>
+            </div>
+            {detail.map((g,i)=>(
+              <div key={i} className="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-4 py-2.5 items-center">
+                <div>
+                  <div className="text-[13.5px] font-bold text-slate-700">{g.line||"(라인없음)"}</div>
+                  <div className="text-[11px] text-slate-400">{g.shift} · {g.rows.length}품번 · {g.qty.toLocaleString()}개</div>
+                </div>
+                <div className="w-14 text-center text-[15px]">{g.su?"✅":"❌"}</div>
+                <div className="w-14 text-center text-[15px]">{g.dk?"✅":"❌"}</div>
+                <div className="w-12 text-center text-[15px]">{g.ph?"✅":"❌"}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {sel && detail.length===0 && (
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-center text-[13px] text-slate-400">{sel} 생산계획이 없습니다.</div>
+      )}
+    </div>
+  );
+}
+
 function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLines, onUpload}){
   const [fd, setFd] = useState(todayStr());   // 기본: 오늘만 ("" = 전체)
   const [fl, setFl] = useState("");        // 라인 필터
@@ -1292,8 +1468,9 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLine
   );
 }
 
-function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onHardRefresh, lineFocus, onClearFocus, adminUnlocked, photos, onUploadPhoto, getThumb, onDownloadPhoto, onDeletePhoto, onCreate, onOpen, onEdit}){
+function PlanView({records, settings, planData, onUploadPlan, reportSync, onReloadReport, onHardRefresh, lineFocus, onClearFocus, adminUnlocked, jumpDate, photos, onUploadPhoto, getThumb, onDownloadPhoto, onDeletePhoto, onCreate, onOpen, onEdit}){
   const [date, setDate] = useState(todayStr());
+  useEffect(()=>{ if(jumpDate) setDate(jumpDate); }, [jumpDate]);   // 달력에서 넘어온 날짜 적용
   const fileRef = useRef(null);
   const hasPlan = !!(planData && Array.isArray(planData.rows) && planData.rows.length);
   const canWrite = !!lineFocus || !!adminUnlocked;   // QR 라인 모드 또는 관리자 로그인 → 작성 가능
