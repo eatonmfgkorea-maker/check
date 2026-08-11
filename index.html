@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V082";
+const APP_VERSION = "V083";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -354,6 +354,23 @@ function mergeSettings(cached){
   const keepPlanMaster = cached.masterSource==="plan" && Array.isArray(cached.items) && cached.items.length>0;
   if(keepPlanMaster) return { ...base, ...cached };
   return { ...base, ...cached, lines: base.lines, items: base.items, masterSource: base.masterSource, masterLoadedAt: base.masterLoadedAt };
+}
+// 설정 유실 복구: 드라이브의 인력/이메일/비번 필드가 '비어있고' 로컬엔 남아있으면 로컬 것으로 되살림
+function recoverSettings(local, drive){
+  const m = mergeSettings(drive);
+  let recovered = false;
+  if(local && typeof local==="object"){
+    ["emails","passwords"].forEach(f=>{
+      const dn=Object.keys(m[f]||{}).length, ln=Object.keys(local[f]||{}).length;
+      if(dn===0 && ln>0){ m[f]=local[f]; recovered=true; }
+    });
+    ["writers","reviewers","managers"].forEach(f=>{
+      const dn=(m[f]||[]).length, ln=(local[f]||[]).length;
+      if(dn===0 && ln>0){ m[f]=local[f]; recovered=true; }
+    });
+  }
+  recoverSettings._recovered = recovered;
+  return m;
 }
 
 /* ============================================================
@@ -790,7 +807,7 @@ function App(){
         const r = await driveLoad();
         if(r.ok && r.data && Array.isArray(r.data.records)){
           setRecords(local=>{ const mr = mergeRecords(local, r.data.records); if(mr.changed) needPushRef.current = true; return mr.merged; });
-          if(r.data.settings) setSettings(mergeSettings(r.data.settings));
+          if(r.data.settings) setSettings(local=>{ const ms=recoverSettings(local, r.data.settings); if(recoverSettings._recovered) needPushRef.current=true; return ms; });
           if(r.data.planData && Array.isArray(r.data.planData.rows)) setPlanData(r.data.planData);
           setSync({state:"ok", msg:"동기화됨"});
         } else if(r.ok){
@@ -844,7 +861,7 @@ function App(){
 
   // 액션
   const saveNow = useCallback(async(arr)=>{   // 디바운스 안 기다리고 즉시 드라이브 저장 (결재 유실 방지)
-    if(!GAS_URL) return;
+    if(!GAS_URL || !loadedRef.current) return;   // 로드 완료 전엔 저장 금지 (기본값이 백업을 덮어쓰는 사고 방지)
     setSync(s=>({...s, state:"saving"}));
     const r = await driveSave({records:arr, settings, planData, ver:APP_VERSION});
     if(!r.ok && !retryRef.current){ retryRef.current=true; setTimeout(()=>{ retryRef.current=false; setSaveNudge(n=>n+1); }, 6000); }
