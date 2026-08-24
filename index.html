@@ -70,7 +70,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V083";
+const APP_VERSION = "V084";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -1634,6 +1634,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
   const [boardBusy, setBoardBusy] = useState("");      // "라인|주야" 업로드중 표시
   const [boardViewer, setBoardViewer] = useState(null); // 사진 미리보기 대상
   const pickBoardPhoto = (row)=>{ boardMetaRef.current={line:row.line, date: row.rdate||date, shift:row.shift}; boardInputRef.current && boardInputRef.current.click(); };
+  const pickBriefingBoard = ()=>{ boardMetaRef.current={line:"조회일지", date: date, shift:""}; boardInputRef.current && boardInputRef.current.click(); };
   const onBoardFile = async(e)=>{
     const f = e.target.files && e.target.files[0]; e.target.value="";
     const meta = boardMetaRef.current; if(!f || !meta) return;
@@ -1650,6 +1651,14 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       className="w-full px-1 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-[11px] font-bold border border-emerald-200 whitespace-nowrap">📷✓</button>;
     return <button onClick={()=>pickBoardPhoto(row)}
       className="w-full px-1 py-1.5 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 text-[11px] font-bold whitespace-nowrap hover:border-slate-500 hover:text-slate-600">📷+</button>;
+  };
+  const briefingPhoto = (photos&&photos.list||[]).find(p=> p.date===date && normLine(p.line)===normLine("조회일지"));
+  const BrfBoardBtn = ()=>{
+    if(boardBusy==="조회일지|") return <div className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-400 text-[12px] font-bold whitespace-nowrap">업로드…</div>;
+    if(briefingPhoto) return <button onClick={()=>setBoardViewer(briefingPhoto)}
+      className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-[12px] font-bold border border-emerald-200 whitespace-nowrap">📷 현황판 ✓</button>;
+    return <button onClick={pickBriefingBoard}
+      className="px-3 py-1.5 rounded-lg border-2 border-dashed border-emerald-300 text-emerald-600 text-[12px] font-bold whitespace-nowrap hover:border-emerald-500 hover:text-emerald-700">📷 현황판 +</button>;
   };
 
   const SectTable = ({title, rows, accent})=>(
@@ -1864,7 +1873,7 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
           <div className="text-[13px] font-extrabold text-slate-700">조회일지</div>
           <div className="text-[11px] text-slate-400">{fmtDate(date)}{brf&&brf.writer?` · 작성 ${brf.writer}`:""}</div>
         </div>
-        <div className="ml-auto"><BrfBtn/></div>
+        <div className="ml-auto flex items-center gap-2"><BrfBoardBtn/><BrfBtn/></div>
       </div>}
 
       {!hasPlan && (
