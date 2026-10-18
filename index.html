@@ -163,7 +163,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V089";
+const APP_VERSION = "V090";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -415,7 +415,8 @@ function defaultSettings(){
     writers: ["황숙향"],
     reviewers: [],
     managers: ["이승현"],
-    defaultS3: "이승현",   // 기본 승인자 (검토 단계 없음)
+    defaultS3: "이승현",   // 기본 승인자
+    crossPairs: [["황숙향","김나영"]],   // 교차 검토 짝: 한 사람이 작성하면 다른 사람이 검토 (작성 시 본인 비밀번호 확인)
     passwords: {},   // { 이름: 해시 } — 결재 비밀번호
     emails: {},      // { 이름: 이메일 } — 결재 알림 메일
     adminPw: hashPw("1550612a"),   // 설정(관리자) 진입 비밀번호
@@ -492,6 +493,23 @@ const nowStr = () => new Date().toISOString();
 function fmtDate(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function fmtDateTime(s){ if(!s) return ""; const d=new Date(s); if(isNaN(d)) return s; return `${fmtDate(s)} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }
 function roleLabels(type){ return ["작성","검토","승인"]; }
+// 교차 검토: 짝으로 등록된 사람이 작성하면 상대방이 검토자
+function crossPartner(settings, name){
+  const n=String(name||"").trim(); if(!n) return "";
+  for(const pr of ((settings&&settings.crossPairs)||[])){ if(!pr||pr.length<2) continue; if(pr[0]===n) return pr[1]||""; if(pr[1]===n) return pr[0]||""; }
+  return "";
+}
+// 지금 결재 차례 (검토자가 있고 아직 검토 전이면 검토, 아니면 승인)
+function curStepOf(r){ const a=r.approval||{}; return (a.s2 && a.s2.name && !a.s2.approved) ? "s2" : "s3"; }
+// 결재상신 시 결재선 확정
+function finalizeApproval(r, settings, writerName){
+  const w = writerName || "";
+  const rev = crossPartner(settings, w) || (r.approval.s2 && r.approval.s2.name) || "";
+  r.approval.s1 = {name:w, approved:true, at:nowStr()};
+  r.approval.s2 = rev ? {name:rev, approved:false, at:""} : {name:"", approved:true, at:""};
+  r.approval.s3 = {...r.approval.s3, approved:false, at:""};
+  return r;
+}
 function lotOf(r){ if(!r||r.type==="briefing") return ""; return (r.type==="dock" ? r.batchNo : r.lot) || ""; }
 // 조회일지용: 특정 날짜·주야의 생산계획을 "라인: 품명, 품명 / 라인2: 품명" 형태로
 function briefingPlanText(planData, date, shift){
@@ -1038,26 +1056,50 @@ function App(){
 
   function approveMany(targets, opts){
     opts = opts||{};
+    const mails = {};
     setRecords(prev=>{ const next = prev.map(r=>{
       const t = targets.find(x=>x.id===r.id);
       if(!t) return r;
       const a = { s1:{...r.approval.s1}, s2:{...r.approval.s2}, s3:{...r.approval.s3} };
-      // 단일 승인: 작성/검토는 자동 처리, 승인(s3)만 결재
+      const step = t.step || curStepOf(r);
       if(!a.s1.approved) a.s1={...a.s1, approved:true, at:a.s1.at||nowStr()};
-      if(!a.s2.approved) a.s2={...a.s2, approved:true, at:a.s2.at||""};
-      a.s3={...a.s3, approved:true, at:nowStr()};
+      if(step==="s2"){
+        a.s2={...a.s2, approved:true, at:nowStr()};
+      } else {
+        if(!a.s2.approved) a.s2={...a.s2, approved:true, at:a.s2.at||nowStr()};
+        a.s3={...a.s3, approved:true, at:nowStr()};
+      }
       let comments = Array.isArray(r.comments) ? [...r.comments] : [];
       if(opts.comment && opts.comment.trim()){
         const L = roleLabels(r.type);
-        comments.push({ name: opts.name || a.s3.name, role: L[2], text: opts.comment.trim(), at: nowStr() });
+        comments.push({ name: opts.name || a[step].name, role: step==="s2"?L[1]:L[2], text: opts.comment.trim(), at: nowStr() });
       }
       const done = a.s1.approved && a.s2.approved && a.s3.approved;
-      return {...r, approval:a, comments, status: done?"done":"pending", updatedAt:nowStr()};
+      const nr = {...r, approval:a, comments, status: done?"done":"pending", updatedAt:nowStr()};
+      if(!done){ const nm=a[curStepOf(nr)].name; if(nm) (mails[nm]=mails[nm]||[]).push(nr); }
+      return nr;
     }); queueMicrotask(()=>saveNow(next)); return next; });
+    setTimeout(()=>{ Object.entries(mails).forEach(([nm,list])=>{ const to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, list); }); }, 50);
   }
+  // 결재상신: 작성자가 교차 검토 대상이면 본인 비밀번호 확인 후 상신
+  const [wAuth, setWAuth] = useState(null);   // {name, run}
+  const submitWithAuth = (r, writerName, after)=>{
+    const run = ()=>{
+      r.status="pending";
+      finalizeApproval(r, settings, writerName);
+      upsert(r);
+      { const nm=r.approval[curStepOf(r)].name, to=(settings.emails||{})[nm]; if(nm && to) sendApprovalMail(to, nm, [r]); }
+      setEditing(null); after && after();
+    };
+    if(crossPartner(settings, writerName)) setWAuth({name:writerName, run});
+    else run();
+  };
   const setPwForPerson = useCallback((name, hash)=>{
     setSettings(prev=>({...prev, passwords:{...(prev.passwords||{}), [name]: hash}}));
   }, []);
+  const wAuthModal = wAuth && <AuthModal auth={{name:wAuth.name, targets:[], title:"결재상신 전 작성자 본인 확인", allowComment:false, mode:"submit"}}
+    passwords={settings.passwords||{}} onSetPassword={setPwForPerson}
+    onClose={()=>setWAuth(null)} onConfirm={()=>{ const f=wAuth.run; setWAuth(null); f(); }}/>;
 
   function exportJson(){
     const blob = new Blob([JSON.stringify({records,settings,planData,ver:APP_VERSION},null,2)], {type:"application/json"});
@@ -1082,28 +1124,18 @@ function App(){
     return <Viewer rec={viewing} settings={settings} onClose={()=>setViewing(null)} />;
   }
   if(editing && editing.type==="es"){
-    return <EsEditor rec={editing} settings={settings}
+    return <><EsEditor rec={editing} settings={settings}
       onCancel={()=>setEditing(null)}
       onSaveDraft={(r)=>{ r.status="draft"; upsert(r); setEditing(null); setTab("es"); }}
-      onSubmit={(r)=>{ r.status="pending";
-        r.approval.s1={name:r.approval.s1.name||r.inspector||"", approved:true, at:nowStr()};
-        r.approval.s2={name:"", approved:true, at:""};
-        upsert(r);
-        { const nm=r.approval.s3.name, to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, [r]); }
-        setEditing(null); setTab("inbox"); }}
-    />;
+      onSubmit={(r)=> submitWithAuth(r, r.approval.s1.name||r.inspector||"", ()=>setTab("inbox"))}
+    />{wAuthModal}</>;
   }
   if(editing){
-    return <Editor rec={editing} settings={settings} records={liveRecs} planData={planData}
+    return <><Editor rec={editing} settings={settings} records={liveRecs} planData={planData}
       onCancel={()=>setEditing(null)}
       onSaveDraft={(r)=>{ r.status="draft"; upsert(r); setEditing(null); setTab("list"); }}
-      onSubmit={(r)=>{ r.status="pending";
-        r.approval.s1={name:r.approval.s1.name||r.shiftLeader||r.writer||"", approved:true, at:nowStr()};
-        r.approval.s2={name:r.approval.s2.name||"", approved:true, at:r.approval.s2.at||""};
-        upsert(r);
-        { const nm=r.approval.s3.name, to=(settings.emails||{})[nm]; if(to) sendApprovalMail(to, nm, [r]); }
-        setEditing(null); setTab("inbox"); }}
-    />;
+      onSubmit={(r)=> submitWithAuth(r, r.approval.s1.name||r.shiftLeader||r.writer||"", ()=>setTab("inbox"))}
+    />{wAuthModal}</>;
   }
 
   return (
@@ -2169,11 +2201,17 @@ function Editor({rec, settings, records, planData, onCancel, onSaveDraft, onSubm
             <Field label={roleLabels(r.type)[0]+" (작성자)"}>
               <PeopleSelect list={settings.writers} value={r.approval.s1.name || (r.shiftLeader||r.writer||"")} onChange={v=>setApproval("s1",v)}/>
             </Field>
+            <Field label="검토자">
+              {(()=>{ const w=r.approval.s1.name || (r.shiftLeader||r.writer||""); const pt=crossPartner(settings, w);
+                return pt
+                  ? <div className={inputCls+" flex items-center justify-between bg-slate-50"} style={{height:44}}><b className="text-slate-800">{pt}</b><span className="text-[11px] text-indigo-600 font-bold">교차 검토 자동</span></div>
+                  : <PeopleSelect list={uniq([...(settings.reviewers||[]), ...(settings.writers||[])])} value={r.approval.s2.name} onChange={v=>setApproval("s2",v)}/>; })()}
+            </Field>
             <Field label="승인자" req>
               <PeopleSelect list={settings.managers} value={r.approval.s3.name} onChange={v=>setApproval("s3",v)}/>
             </Field>
           </div>
-          <p className="text-[12px] text-slate-400 mt-2">결재상신 시 <b>{roleLabels(r.type)[0]}</b> 서명이 자동 처리되고, 결재함에서 <b>승인자</b>가 승인하면 완료됩니다.</p>
+          <p className="text-[12px] text-slate-400 mt-2">결재상신 시 <b>작성자 본인 확인</b>(교차 검토 대상자는 비밀번호) 후 상신되고, 결재함에서 <b>검토 → 승인</b> 순서로 결재합니다. (검토자 없으면 바로 승인)</p>
         </section>
       </main>
 
@@ -2523,7 +2561,7 @@ function buildApprovalListMail(recs, toName){
     const m = TYPE_META[r.type];
     const body = rowsOf(r).map(([k,v])=>`<tr><td style="${tdK}">${k}</td><td style="${tdV}">${v}</td></tr>`).join("");
     const L = roleLabels(r.type); const a = r.approval||{};
-    const chain = `${L[0]} ${a.s1&&a.s1.name||"-"} → ${L[2]} ${a.s3&&a.s3.name||"-"}`;
+    const chain = `${L[0]} ${a.s1&&a.s1.name||"-"}${a.s2&&a.s2.name?` → ${L[1]} ${a.s2.name}`:""} → ${L[2]} ${a.s3&&a.s3.name||"-"}`;
     return `<div style="margin:0 0 16px">
       <div style="display:inline-block;font-size:13px;font-weight:800;color:#fff;background:${m.accent};padding:4px 12px;border-radius:6px;margin:0 0 8px">${m.label}${r.name?` · ${r.name}`:""}</div>
       <table style="border-collapse:collapse;width:100%">${body}</table>
@@ -2556,8 +2594,8 @@ function InboxView({records, onApprove, onOpen, passwords, onSetPassword}){
   const pending = useMemo(()=> records.filter(r=>r.status==="pending")
     .sort((a,b)=>(a.updatedAt||"").localeCompare(b.updatedAt||"")), [records]);
 
-  const stepOf = (r)=> "s3";
-  const currentApprover = (r)=> (r.approval.s3.name)||"(미지정)";
+  const stepOf = (r)=> curStepOf(r);
+  const currentApprover = (r)=> (r.approval[curStepOf(r)].name)||"(미지정)";
 
   const groups = useMemo(()=>{
     const m=new Map();
@@ -2629,9 +2667,9 @@ function InboxView({records, onApprove, onOpen, passwords, onSetPassword}){
 
 function InboxCard({r, onOpen, onApproveClick}){
   const L = roleLabels(r.type); const a=r.approval; const meta=TYPE_META[r.type];
-  const step = "s3";
-  const stepName = a.s3.name;
-  const stepLabel = L[2];
+  const step = curStepOf(r);
+  const stepName = a[step].name;
+  const stepLabel = step==="s2" ? L[1] : L[2];
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4">
       <div className="flex items-center gap-2 mb-1">
@@ -2642,13 +2680,14 @@ function InboxCard({r, onOpen, onApproveClick}){
       <div className="font-bold text-slate-800">{recTitle(r)}</div>
       <div className="mt-2 flex items-center gap-2 text-[12px] flex-wrap">
         <Step ok={a.s1.approved} label={L[0]} name={a.s1.name}/>
+        {a.s2 && a.s2.name && <><div className="flex-1 h-px bg-slate-200"/><Step ok={a.s2.approved} label={L[1]} name={a.s2.name}/></>}
         <div className="flex-1 h-px bg-slate-200"/>
         <Step ok={a.s3.approved} label={L[2]} name={a.s3.name}/>
       </div>
       <div className="mt-3 flex gap-2">
         <button className="px-3 py-2 rounded-lg border border-slate-300 text-[13px] text-slate-600" onClick={()=>onOpen(r)}>내용 보기</button>
         <button className="flex-1 py-2 rounded-lg text-white text-[14px] font-bold" style={{background:meta.accent}} onClick={onApproveClick}>
-          승인{stepName?` · ${stepName}`:""}
+          {stepLabel}{stepName?` · ${stepName}`:""}
         </button>
       </div>
     </div>
@@ -2675,9 +2714,9 @@ function AuthModal({auth, passwords, onSetPassword, onClose, onConfirm}){
   return (
     <div className="fixed inset-0 z-50 bg-black/40 grid place-items-center p-4" onClick={onClose}>
       <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={e=>e.stopPropagation()}>
-        <div className="font-extrabold text-slate-800 text-[16px]">결재 승인</div>
+        <div className="font-extrabold text-slate-800 text-[16px]">{auth.mode==="submit" ? "작성자 확인" : "결재 승인"}</div>
         <div className="text-[13px] text-slate-500 mt-1">{auth.title}</div>
-        <div className="mt-1 text-[13px] text-slate-600">결재자 <b className="text-slate-900">{auth.name}</b> · {auth.targets.length}건</div>
+        <div className="mt-1 text-[13px] text-slate-600">{auth.mode==="submit" ? <>작성자 <b className="text-slate-900">{auth.name}</b> 본인 비밀번호를 입력하세요.</> : <>결재자 <b className="text-slate-900">{auth.name}</b> · {auth.targets.length}건</>}</div>
         {has ? (
           <div className="mt-4">
             <Field label="비밀번호">
@@ -2700,7 +2739,7 @@ function AuthModal({auth, passwords, onSetPassword, onClose, onConfirm}){
         )}
         <div className="mt-5 flex gap-2">
           <button className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-bold" onClick={onClose}>취소</button>
-          <button className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold" onClick={submit}>{has?"승인":"설정 후 승인"}</button>
+          <button className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold" onClick={submit}>{auth.mode==="submit" ? (has?"확인 후 결재상신":"설정 후 결재상신") : (has?"승인":"설정 후 승인")}</button>
         </div>
       </div>
     </div>
@@ -2951,6 +2990,7 @@ function PeopleSettings({settings, setSettings}){
           </Field>
         </div>
       </div>
+      <CrossPairSettings settings={settings} setSettings={setSettings}/>
       <EmailSettings settings={settings} setSettings={setSettings}/>
       <PasswordSettings settings={settings} setSettings={setSettings}/>
       <AdminPwSettings settings={settings} setSettings={setSettings}/>
@@ -2958,9 +2998,37 @@ function PeopleSettings({settings, setSettings}){
   );
 }
 
+function CrossPairSettings({settings, setSettings}){
+  const pairs = settings.crossPairs||[];
+  const names = uniq([...(settings.writers||[]), ...(settings.reviewers||[]), ...(settings.managers||[]), ...pairs.flat()].filter(Boolean));
+  const setPair = (i,j,v)=> setSettings(p=>({...p, crossPairs:(p.crossPairs||[]).map((pr,k)=> k===i ? (j===0?[v,pr[1]]:[pr[0],v]) : pr)}));
+  const sel = (i,j,v)=> (
+    <select className={inputCls} value={v||""} onChange={e=>setPair(i,j,e.target.value)}>
+      <option value="">선택</option>{uniq([...names, v].filter(Boolean)).map(n=><option key={n} value={n}>{n}</option>)}
+    </select>
+  );
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="font-bold text-slate-700">교차 검토</div>
+      <p className="text-[12px] text-slate-400 mt-0.5 mb-3">짝으로 묶인 두 사람은 서로의 문서를 검토합니다. (A가 작성하면 B가 검토, B가 작성하면 A가 검토) · 이 사람들은 결재상신할 때 본인 비밀번호를 입력해야 합니다.</p>
+      <div className="space-y-2">
+        {pairs.map((pr,i)=>(
+          <div key={i} className="flex items-center gap-2">
+            <div className="flex-1">{sel(i,0,pr[0])}</div>
+            <span className="text-slate-400 font-bold">⇄</span>
+            <div className="flex-1">{sel(i,1,pr[1])}</div>
+            <button className="px-2 text-rose-400 text-[13px]" onClick={()=>setSettings(p=>({...p, crossPairs:(p.crossPairs||[]).filter((_,k)=>k!==i)}))}>삭제</button>
+          </div>
+        ))}
+      </div>
+      <button className="mt-3 px-3 py-1.5 rounded-lg border border-slate-300 text-[13px] font-bold text-slate-600" onClick={()=>setSettings(p=>({...p, crossPairs:[...(p.crossPairs||[]), ["",""]]}))}>+ 짝 추가</button>
+    </div>
+  );
+}
+
 function EmailSettings({settings, setSettings}){
   const emails = settings.emails||{};
-  const people = useMemo(()=> uniq([...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.managers, settings.writers]);
+  const people = useMemo(()=> uniq([...(settings.managers||[]), ...(settings.writers||[]), ...(settings.reviewers||[]), ...((settings.crossPairs||[]).flat())].filter(Boolean)), [settings.managers, settings.writers, settings.reviewers, settings.crossPairs]);
   const setEmail=(name,val)=> setSettings(p=>({...p, emails:{...(p.emails||{}), [name]: val}}));
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -3006,7 +3074,7 @@ function AdminPwSettings({settings, setSettings}){
 
 function PasswordSettings({settings, setSettings}){
   const pwMap = settings.passwords||{};
-  const people = useMemo(()=> uniq([...(settings.managers||[]), ...(settings.writers||[])].filter(Boolean)), [settings.managers, settings.writers]);
+  const people = useMemo(()=> uniq([...(settings.managers||[]), ...(settings.writers||[]), ...(settings.reviewers||[]), ...((settings.crossPairs||[]).flat())].filter(Boolean)), [settings.managers, settings.writers, settings.reviewers, settings.crossPairs]);
   const [editing, setEditing] = useState(null);  // name being set
   const [pw, setPw] = useState("");
 
@@ -3111,7 +3179,7 @@ function CommentsBlock({rec}){
 
 function SignBox({rec}){
   const L = roleLabels(rec.type); const a=rec.approval;
-  const cells=[[L[0],a.s1],[L[2],a.s3]];
+  const cells=[[L[0],a.s1],[L[1],a.s2&&a.s2.name?a.s2:{name:"",approved:false}],[L[2],a.s3]];
   return (
     <table style={{borderCollapse:"collapse"}}>
       <tbody>
@@ -3544,7 +3612,7 @@ function EsEditor({rec, settings, onCancel, onSaveDraft, onSubmit}){
   const setAp = (k,name)=> setR(p=>({...p, approval:{...p.approval, [k]:{...p.approval[k], name}}}));
   const inspectors = settings.esInspectors||[];
   const writers = uniq([...(settings.writers||[]), ...inspectors]);
-  const ed = {set, setVal, setSpec, setAp, inspectors, writers, managers:settings.managers||[]};
+  const ed = {set, setVal, setSpec, setAp, inspectors, writers, managers:settings.managers||[], partner:(n)=>crossPartner(settings, n)};
 
   function validate(){
     const need=[];
@@ -3581,7 +3649,7 @@ function EsEditor({rec, settings, onCancel, onSaveDraft, onSubmit}){
             <EsSheet r={r} ed={ed}/>
           </div>
         </div>
-        <p className="text-[12px] text-slate-400 mt-2 px-1">노란 칸에 입력합니다. 숫자 입력 후 <b>Enter</b>를 누르면 다음 칸으로 이동합니다. 결재상신 시 <b>작성</b> 서명이 자동 처리되고, 결재함에서 <b>승인자</b>가 승인하면 완료됩니다.</p>
+        <p className="text-[12px] text-slate-400 mt-2 px-1">노란 칸에 입력합니다. 숫자 입력 후 <b>Enter</b>를 누르면 다음 칸으로 이동합니다. 결재상신 시 <b>작성자 본인 확인</b> 후 상신되고, 결재함에서 <b>검토 → 승인</b> 순서로 결재합니다.</p>
       </div>
       <div className="fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-20">
         <div className="max-w-6xl mx-auto px-4 py-3 flex gap-2">
@@ -4201,7 +4269,7 @@ function EsBottom({r, ed, t, kinds}){
             <tr>
               {ed ? <>
                 <td className="in">{signSel("s1", ed.writers)}</td>
-                <td className="na">/</td>
+                <td className="na">{ed.partner && ed.partner(a.s1.name) ? <div style={{fontSize:"13px", fontWeight:800, color:"#1e293b"}}>{ed.partner(a.s1.name)}<div style={{fontSize:"9.5px", color:"#4f46e5", fontWeight:700, marginTop:"2px"}}>교차 검토</div></div> : "/"}</td>
                 <td className="in">{signSel("s3", ed.managers)}</td>
               </> : <>
                 <td><EsSignCell st={a.s1}/></td>
