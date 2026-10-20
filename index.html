@@ -107,6 +107,11 @@
   .esd-tag { display:inline-block; min-width:34px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; }
   .esd-tag.o { color:#15803d; background:#dcfce7; }
   .esd-tag.n { color:#b91c1c; background:#fee2e2; }
+  .esd-t tr.radd td { background:#fbfcfe; padding:4px 6px; text-align:left; border-style:dashed; }
+  .esd-add { height:28px; padding:0 14px; border-radius:7px; border:1.5px dashed #93b4e6; background:#fff; color:#1d4f9a; font-size:12px; font-weight:800; margin-right:6px; }
+  .esd-add.m { border-color:#e5b4b4; color:#b91c1c; font-weight:700; }
+  .esd-wait { color:#c3cbd6; font-weight:800; }
+  .esd-t td.sp.auto { background:#f4f8fd; }
   .esd-tog { white-space:nowrap; overflow:hidden; width:100%; height:26px; border-radius:7px; font-size:11.5px; font-weight:800; padding:0; border:1.5px dashed #d8c27a; background:rgba(255,255,255,.7); color:#b8a45c; letter-spacing:.3px; }
   .esd-tog.o { border:1.5px solid #16a34a; background:#16a34a; color:#fff; }
   .esd-tog.n { border:1.5px solid #dc2626; background:#dc2626; color:#fff; }
@@ -163,7 +168,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V090";
+const APP_VERSION = "V091";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -3438,12 +3443,12 @@ function esJudge(val, crit){
 function esRecJudge(r){
   const t=r.tpl; if(!t) return "-";
   let missing=false, ng=false;
-  esLeaves(t).forEach((c,ci)=>{
+  esLeaves(t, r).forEach((c,ci)=>{
     for(let s=0;s<c.ns;s++){ const v=((r.vals||{})[ci]||[])[s]; if(String(v??"").trim()===""){ missing=true; continue; } if(esJudge(v,c.crit)===false) ng=true; }
   });
-  esSpecList(t).forEach(({i})=>{
-    const w=(r.specW||{})[i], l=(r.specL||{})[i];
-    if(!w||!l) missing=true; if(w==="NG"||l==="NG") ng=true;
+  esSpecList(t, r).forEach(e=>{
+    const st=esSpecState(r, e);
+    if(st.v==="NG") ng=true; else if(!st.v) missing=true;
   });
   return ng ? "NG" : missing ? "미입력" : "OK";
 }
@@ -3586,11 +3591,11 @@ function EsSheet({r, ed}){
             <tr key={li}><td className="lb">{lab}</td>{t.cols.map((c,i)=><td key={i}>{(c.conds||[])[li]}</td>)}</tr>
           ))}
           <tr className="hc"><td className="lb">Acceptance Criteria</td>{t.cols.map((c,i)=><td key={i}>{c.crit}</td>)}</tr>
-          {Array.from({length:t.samples}).map((_,s)=>(
+          {Array.from({length:esNsOf(r,0)}).map((_,s)=>(
             <tr key={s} className="rs"><td className="lb num">{s+1}</td>{t.cols.map((c,ci)=>esValCell(r, ed, ci, s, c.crit, 1, ci))}</tr>
           ))}
-          <tr className="rsp"><td className="lb">Spec 확인 (작업자)</td>{t.cols.map((c,ci)=>esSpecCell(r, ed, "specW", ci, 1, ci))}</tr>
-          <tr className="rsp"><td className="lb">Spec 확인 (조장)</td>{t.cols.map((c,ci)=>esSpecCell(r, ed, "specL", ci, 1, ci))}</tr>
+          {ed && <EsAddRow r={r} ed={ed} bi={0} span={t.cols.length+1}/>}
+          <tr className="rsp"><td className="lb">Spec 확인</td>{t.cols.map((c,ci)=>esAutoSpecCell(r, ed, ci, 1, ci))}</tr>
         </tbody>
       </table>
       <EsBottom r={r} ed={ed} t={t} kinds={ES_KINDS}/>
@@ -3609,10 +3614,22 @@ function EsEditor({rec, settings, onCancel, onSaveDraft, onSubmit}){
   });
   const setVal = (ci,s,v)=> setR(p=>{ const vals={...(p.vals||{})}; const arr=[...(vals[ci]||[])]; arr[s]=v; vals[ci]=arr; return {...p, vals}; });
   const setSpec = (k,ci,v)=> setR(p=>({...p, [k]:{...(p[k]||{}), [ci]:v}}));
+  const setNs = (bi,n)=> setR(p=>{
+    const cur=esNsOf(p,bi); n=Math.max(2, Math.min(20, n)); if(n===cur) return p;
+    const nS={...(p.nS||{}), [bi]:n};
+    let vals=p.vals||{};
+    if(n<cur){ // 줄인 시료의 값 삭제
+      vals={...vals}; let off=0;
+      esBlocks(p.tpl).forEach((b,i)=>{ const L=(b.leaves||[]).length || ((p.tpl.cols||[]).length);
+        if(i===bi) for(let li=off; li<off+L; li++) if(vals[li]) vals[li]=vals[li].slice(0,n);
+        off+=L; });
+    }
+    return {...p, nS, vals};
+  });
   const setAp = (k,name)=> setR(p=>({...p, approval:{...p.approval, [k]:{...p.approval[k], name}}}));
   const inspectors = settings.esInspectors||[];
   const writers = uniq([...(settings.writers||[]), ...inspectors]);
-  const ed = {set, setVal, setSpec, setAp, inspectors, writers, managers:settings.managers||[], partner:(n)=>crossPartner(settings, n)};
+  const ed = {set, setVal, setSpec, setNs, setAp, inspectors, writers, managers:settings.managers||[], partner:(n)=>crossPartner(settings, n)};
 
   function validate(){
     const need=[];
@@ -3620,13 +3637,10 @@ function EsEditor({rec, settings, onCancel, onSaveDraft, onSubmit}){
     if(!String(r.lot||"").trim()) need.push("Lot No.");
     if(!String(r.serial||"").trim()) need.push("Serial No.");
     if(!String(r.inspector||"").trim()) need.push("검사자");
-    esLeaves(t).forEach((c,ci)=>{
+    esLeaves(t, r).forEach((c,ci)=>{
       for(let s=0;s<c.ns;s++){ if(String(((r.vals||{})[ci]||[])[s]??"").trim()==="") need.push(c.ns>1?`${c.code} ${s+1}회`:c.code); }
     });
-    esSpecList(t).forEach(({i,code})=>{
-      if(!(r.specW||{})[i]) need.push(`${code} Spec(작업자)`);
-      if(!(r.specL||{})[i]) need.push(`${code} Spec(조장)`);
-    });
+    if(!need.length) esSpecList(t, r).forEach(e=>{ if(!esSpecState(r, e).v) need.push(`${e.code} Spec 확인(OK/NG 선택)`); });
     if(!r.approval.s1.name) need.push("작성자");
     if(!r.approval.s3.name) need.push("승인자");
     if(need.length){ alert(`입력하지 않은 항목이 있습니다.\n\n${need.join(", ")}`); return false; }
@@ -3682,11 +3696,11 @@ function EsView({records, settings, onNew, onOpen, onEdit, onDelete}){
   function exportXlsx(){
     if(!rows.length){ alert("내보낼 문서가 없습니다."); return; }
     const keys=[];
-    rows.forEach(r=> esLeaves(r.tpl).forEach(c=>{ for(let s=0;s<c.ns;s++){ const k=`${c.code} #${s+1}`; if(!keys.includes(k)) keys.push(k); } }));
+    rows.forEach(r=> esLeaves(r.tpl, r).forEach(c=>{ for(let s=0;s<c.ns;s++){ const k=`${c.code} #${s+1}`; if(!keys.includes(k)) keys.push(k); } }));
     const data=[["검사일자","라인","아이템","구분","Lot No.","Serial No.","검사자",...keys,"판정","결재","작성","승인"]];
     rows.forEach(r=>{
       const m={};
-      esLeaves(r.tpl).forEach((c,ci)=>{ for(let s=0;s<c.ns;s++){ const v=((r.vals||{})[ci]||[])[s]; const n=parseFloat(v); m[`${c.code} #${s+1}`] = (v===undefined||v==="")? "" : (isNaN(n)? v : n); } });
+      esLeaves(r.tpl, r).forEach((c,ci)=>{ for(let s=0;s<c.ns;s++){ const v=((r.vals||{})[ci]||[])[s]; const n=parseFloat(v); m[`${c.code} #${s+1}`] = (v===undefined||v==="")? "" : (isNaN(n)? v : n); } });
       data.push([fmtDate(r.prodDate), r.line, r.name, r.kind, r.lot, r.serial, r.inspector, ...keys.map(k=>m[k]??""), esRecJudge(r), statusText(r),
         r.approval.s1.approved?r.approval.s1.name:"", r.approval.s3.approved?r.approval.s3.name:""]);
     });
@@ -3904,16 +3918,46 @@ function EsTemplateEditor({tpl, lines, upd, onDup, onDel}){
 /* ---- 격자형 양식 (엑셀 병합 구조 그대로) · 여러 표(블록) · 자유형(ICV 가로형) ---- */
 function esBlocks(t){ return (t && t.blocks) || [{hdr:(t&&t.hdr)||[], critRow:t?t.critRow:-1, leaves:(t&&t.leaves)||[], samples:(t&&t.samples)||2, specLabels:(t&&t.specLabels)||[]}]; }
 // 입력칸 목록 (ns = 측정 횟수)
-function esLeaves(t){
+// 시료 수: 기록에서 추가한 수(r.nS) 우선, 없으면 양식 기본(최소 2)
+function esNsOf(r, bi){
+  const t=r&&r.tpl; const x=r&&r.nS&&r.nS[bi]; if(x) return x;
+  if(!t) return 2;
+  if(t.kind==="grid") return Math.max(2, (esBlocks(t)[bi]||{}).samples||2);
+  return Math.max(2, t.samples||2);
+}
+// 입력칸 목록 (ns = 측정 횟수 · r 을 주면 기록의 시료 수 반영)
+function esLeaves(t, r){
   if(!t) return [];
   if(t.kind==="free") return (t.leaves||[]).map(l=>({...l, ns:1}));
-  if(t.kind==="grid") return esBlocks(t).flatMap(b=>(b.leaves||[]).map(l=>({...l, ns:b.samples||2})));
-  return (t.cols||[]).map(c=>({code:c.code, crit:c.crit, ns:t.samples||2}));
+  if(t.kind==="grid") return esBlocks(t).flatMap((b,bi)=>(b.leaves||[]).map(l=>({...l, ns: r ? esNsOf(r,bi) : (b.samples||2)})));
+  return (t.cols||[]).map(c=>({code:c.code, crit:c.crit, ns: r ? esNsOf(r,0) : (t.samples||2)}));
 }
-// Spec 확인 칸 목록 (자유형은 샘플 열 단위)
-function esSpecList(t){
-  if(t && t.kind==="free") return Array.from({length:t.specN||0}).map((_,i)=>({i, code:`Sample#${i+1}`}));
-  return esLeaves(t).map((l,i)=>({i, code:l.code}));
+// Spec 확인 칸 목록 (자유형은 샘플 열 단위) · lv = 판정에 쓰는 입력칸
+function esSpecList(t, r){
+  const L=esLeaves(t, r);
+  if(t && t.kind==="free") return Array.from({length:t.specN||0}).map((_,i)=>{
+    const lv=[]; L.forEach((l,li)=>{ const m=String(l.code||"").match(/(?:S|Sample)\s*#\s*(\d+)/i); if(m && +m[1]===i+1) lv.push({li, ns:1, crit:l.crit}); });
+    return {i, code:`Sample#${i+1}`, lv};
+  });
+  return L.map((l,i)=>({i, code:l.code, lv:[{li:i, ns:l.ns, crit:l.crit}]}));
+}
+// Spec 확인 자동 판정: 값이 모두 규격 안 → OK, 하나라도 벗어남 → NG, 기준을 숫자로 판단할 수 없으면 직접 선택
+function esSpecState(r, e){
+  let ng=false, empty=false, unk=!e.lv.length;
+  e.lv.forEach(({li,ns,crit})=>{
+    const pc = parseCrit(crit||"");
+    for(let s=0;s<ns;s++){
+      const v=((r.vals||{})[li]||[])[s];
+      if(String(v??"").trim()===""){ empty=true; continue; }
+      const j = pc ? esJudge(v, pc) : null;
+      if(j===false) ng=true; else if(j===null) unk=true;
+    }
+  });
+  if(ng) return {v:"NG", auto:true};
+  if(!unk) return {v: empty ? "" : "OK", auto:true};
+  const legacy = (r.specW||{})[e.i]==="NG" || (r.specL||{})[e.i]==="NG" ? "NG" : ((r.specL||{})[e.i] || (r.specW||{})[e.i] || "");
+  const m = (r.spec||{})[e.i] ?? legacy;
+  return {v:m||"", auto:false};
 }
 function esSheetMin(t){
   if(!t || (t.kind!=="grid" && t.kind!=="free")) return 980;
@@ -4223,6 +4267,22 @@ function esSpecCell(r, ed, k, i, cs, key, extra){
   </td>;
 }
 
+function esAutoSpecCell(r, ed, i, cs, key, extra){
+  const e = esSpecList(r.tpl, r).find(x=>x.i===i) || {i, lv:[]};
+  const st = esSpecState(r, e);
+  if(!st.auto) return esSpecCell(r, ed, "spec", i, cs, key, extra);
+  return <td key={key} colSpan={cs} className="sp auto" style={extra} title="입력값으로 자동 판정">
+    {st.v ? <span className={`esd-tag ${st.v==="NG"?"n":"o"}`}>{st.v}</span> : (ed ? <span className="esd-wait">—</span> : "")}
+  </td>;
+}
+function EsAddRow({r, ed, bi, span}){
+  const n=esNsOf(r,bi);
+  return <tr className="radd"><td colSpan={span}>
+    <button type="button" className="esd-add" onClick={()=>ed.setNs(bi,n+1)}>＋ 시료 추가</button>
+    {n>2 && <button type="button" className="esd-add m" onClick={()=>{ if(confirm(`${n}번 시료 줄을 삭제할까요?`)) ed.setNs(bi,n-1); }}>－ 마지막 줄 삭제</button>}
+  </td></tr>;
+}
+
 function EsSignCell({st}){
   if(!st || !st.approved || !st.name) return <span/>;
   const img = signImage(st.name);
@@ -4337,7 +4397,6 @@ function EsGridSheet({r, ed}){
     const isName = hi=> hi < condStart;
     const isSeq = hi=> /^\s*(sequence|seq)\s*$/i.test(labT(b.hdr[hi]));
     const rowCls = hi=> hi===b.critRow ? "hc" : isSeq(hi) ? "hs" : isName(hi) ? (hi===0?"hn":"hn2") : "";
-    const specLab = i=> (b.specLabels||[])[i] || (i===0?"Spec 확인(작업자)":"Spec 확인(조장)");
     return (
       <table key={bi} className="esd-t esg" style={{marginTop: bi===0?0:"14px"}}>
         <colgroup><col style={{width:pct(Math.max(t.lw||12, 13))}}/>{(t.widths||[]).map((w,i)=><col key={i} style={{width:pct(esColW(w))}}/>)}</colgroup>
@@ -4355,11 +4414,11 @@ function EsGridSheet({r, ed}){
               </tr>
             );
           })}
-          {Array.from({length:b.samples||2}).map((_,s)=>(
+          {Array.from({length:esNsOf(r,bi)}).map((_,s)=>(
             <tr key={"s"+s} className="rs"><td className="lb num">{s+1}</td>{(b.leaves||[]).map((lf,li)=>esValCell(r, ed, base+li, s, lf.crit, lf.cs, li))}</tr>
           ))}
-          <tr className="rsp"><td className="lb">{specLab(0)}</td>{(b.leaves||[]).map((lf,li)=>esSpecCell(r, ed, "specW", base+li, lf.cs, li))}</tr>
-          <tr className="rsp"><td className="lb">{specLab(1)}</td>{(b.leaves||[]).map((lf,li)=>esSpecCell(r, ed, "specL", base+li, lf.cs, li))}</tr>
+          {ed && <EsAddRow r={r} ed={ed} bi={bi} span={(t.pc||(t.widths||[]).length)+1}/>}
+          <tr className="rsp"><td className="lb">Spec 확인</td>{(b.leaves||[]).map((lf,li)=>esAutoSpecCell(r, ed, base+li, lf.cs, li))}</tr>
         </tbody>
       </table>
     );
@@ -4391,7 +4450,8 @@ function EsFreeSheet({r, ed}){
         <table className="esd-t esg">
           <colgroup>{(t.widths||[]).map((w,i)=><col key={i} style={{width:pct(esColW(w))}}/>)}</colgroup>
           <tbody>
-            {(t.rows||[]).map((row,ri)=>{
+            {(t.rows||[]).filter(row=>!row.some(c=>c.sp==="L")).map((row,ri)=>{
+              const isSp = row.some(c=>c.sp);
               const live = row.some(c=>c.in!=null || c.sp);
               const rc = live ? (row.some(c=>c.sp) ? "rsp" : "rs") : (ri===0 ? "hn" : "hs");
               let firstText = true;
@@ -4400,10 +4460,11 @@ function EsFreeSheet({r, ed}){
                   {row.map((c,ci)=>{
                     const k=ri+"_"+ci, cs=c.cs||1, rs=c.rs||1;
                     if(c.in!=null){ const lf=(t.leaves||[])[c.in]||{}; return React.cloneElement(esValCell(r, ed, c.in, 0, lf.crit, cs, k), {rowSpan:rs}); }
-                    if(c.sp) return React.cloneElement(esSpecCell(r, ed, c.sp==="W"?"specW":"specL", c.i, cs, k), {rowSpan:rs});
+                    if(c.sp) return React.cloneElement(esAutoSpecCell(r, ed, c.i, cs, k), {rowSpan:rs});
                     let cls = isXCell(c) ? "x" : "";
                     if(live){ if(firstText){ cls += " lb"; firstText=false; } else if(c.b) cls += " cv"; }
-                    return <td key={k} colSpan={cs} rowSpan={rs} className={cls}>{isXCell(c)?"":c.t}</td>;
+                    const txt = isSp && /spec\s*확인/i.test(c.t||"") ? "Spec 확인" : c.t;
+                    return <td key={k} colSpan={cs} rowSpan={rs} className={cls}>{isXCell(c)?"":txt}</td>;
                   })}
                 </tr>
               );
