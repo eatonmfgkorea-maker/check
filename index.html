@@ -51,7 +51,7 @@
   @media print {
     body { background:#fff !important; zoom: 1 !important; }
     .no-print { display:none !important; }
-    .print-root { position:absolute; inset:0; margin:0; padding:0; }
+    .print-root { position:static; min-height:0 !important; margin:0; padding:0; background:#fff !important; }
     .sheet { box-shadow:none !important; border:none !important; width:100% !important; }
     @page { size: A4 portrait; margin: 9mm; }
     table { page-break-inside:auto; }
@@ -145,7 +145,9 @@
   .es-edit .esd-t td.in.ng { background:#fdd5d5; }
   .es-edit .cellin:focus { background:#fff !important; box-shadow: inset 0 0 0 2px #2563eb; border-radius:4px; }
   @page eslandscape { size: A4 landscape; margin: 8mm; }
+  @page esportrait { size: A4 portrait; margin: 8mm; }
   @media print {
+    .es-page.es-pt { page: esportrait; }
     .es-page { page: eslandscape; min-width:0 !important; max-width:none !important; width:100% !important; padding:0 !important; }
     .esg td { font-size:8.5px !important; padding:2px !important; }
     .esd-title { font-size:15px; } .esd-photo { box-shadow:none; }
@@ -168,7 +170,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V091";
+const APP_VERSION = "V092";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -3151,7 +3153,7 @@ function Viewer({rec, settings, onClose}){
         </div>
       </div>
       <div className={`${isEs?"max-w-6xl overflow-x-auto":"max-w-4xl"} mx-auto p-4`}>
-        <div className={`sheet mx-auto shadow-lg ${isEs?"es-page":""}`} style={isEs?{width:"100%", maxWidth: Math.max(1000, esSheetMin(rec.tpl))+"px", minWidth: esSheetMin(rec.tpl)+"px", padding:"16px"}:{maxWidth:"800px", padding:"22px"}}>
+        <div className={`sheet mx-auto shadow-lg ${isEs?"es-page "+(esOrient(rec.tpl, settings)==="portrait"?"es-pt":"es-ls"):""}`} style={isEs?{width:"100%", maxWidth: Math.max(1000, esSheetMin(rec.tpl))+"px", minWidth: esSheetMin(rec.tpl)+"px", padding:"16px"}:{maxWidth:"800px", padding:"22px"}}>
           {isEs ? <EsSheet r={rec}/> : rec.type==="briefing" ? <PrintBriefing r={rec}/> : <PrintChecklist r={rec}/>}
           <CommentsBlock rec={rec}/>
         </div>
@@ -3393,6 +3395,18 @@ function esTemplates(settings){
   const removed = (settings && settings.esRemoved) || [];
   const ids = new Set(stored.map(t=>t.id));
   return [...stored, ...ES_ALL_SEEDS.filter(t=>!ids.has(t.id) && !removed.includes(t.id))];
+}
+// 인쇄 방향: 양식 설정 > 엑셀 원본 인쇄 설정 > 열 수로 추정
+const ES_PORTRAIT = new Set(["tpl_icv_20478", "tpl_icv_20805", "tpl_icv_20903", "tpl_icv_20904", "tpl_icv_20905", "tpl_icv_626887", "tpl_icv_626917", "tpl_icv_626997", "tpl_icv_627722A", "tpl_icv_627942", "tpl_icv_628210", "tpl_lvs_628065", "tpl_lvs_628265", "tpl_mgvv_626929", "tpl_mgvv_627014"]);
+function esOrient(tpl, settings){
+  if(!tpl) return "landscape";
+  const cur = settings ? esTemplates(settings).find(x=>x.id===tpl.id) : null;
+  const o = (cur&&cur.orient) || tpl.orient;
+  if(o==="portrait" || o==="landscape") return o;
+  if(ES_PORTRAIT.has(tpl.id)) return "portrait";
+  if(tpl.kind==="grid") return (tpl.pc||10) <= 5 ? "portrait" : "landscape";
+  if(tpl.kind==="free") return "portrait";
+  return "landscape";
 }
 function esLines(settings){ return uniq([...((settings&&settings.esLines)||[]), ...esTemplates(settings).map(t=>t.line)].filter(Boolean)); }
 
@@ -4083,6 +4097,9 @@ function EsTplBasics({tpl, lines, set, samples, onSamples}){
       <Field label="고객 품번"><input className={inputCls} value={tpl.customerPn||""} onChange={e=>set("customerPn",e.target.value)}/></Field>
       <Field label="Eaton 품번"><input className={inputCls} value={tpl.eatonPn||""} onChange={e=>set("eatonPn",e.target.value)}/></Field>
       <Field label="문서번호/Rev"><input className={inputCls} value={tpl.doc||""} onChange={e=>set("doc",e.target.value)}/></Field>
+      <Field label="인쇄 방향"><select className={inputCls} value={tpl.orient||""} onChange={e=>set("orient",e.target.value)}>
+        <option value="">자동 ({esOrient({...tpl, orient:""})==="portrait"?"세로":"가로"})</option><option value="landscape">가로</option><option value="portrait">세로</option>
+      </select></Field>
     </div>
   );
 }
