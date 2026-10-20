@@ -170,7 +170,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V092";
+const APP_VERSION = "V093";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -314,13 +314,13 @@ async function makeThumbB64(file, max){
 function fileToB64(file){
   return new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>res(String(rd.result).split(",")[1]); rd.onerror=rej; rd.readAsDataURL(file); });
 }
-async function sendBoardPhotoToTelegram(file, meta){
+async function sendBoardPhotoToTelegram(file, meta, b64pre){
   if(!TELEGRAM_RELAY_URL) return;
   try{
-    const b64 = await fileToB64(file);
+    const b64 = b64pre || await fileToB64(file);
     const line = (meta && meta.line) || "현황판";
     const cap = "📷 " + line + " 현황판\n📅 " + ((meta&&meta.date)||"") + " " + ((meta&&meta.shift)||"");
-    const ext = (file.name.match(/\.[A-Za-z0-9]+$/)||[".jpg"])[0];
+    const ext = b64pre ? ".jpg" : (file.name.match(/\.[A-Za-z0-9]+$/)||[".jpg"])[0];
     const fname = (((meta&&meta.date)||"") + "_" + ((meta&&meta.shift)||"") + "_" + line + ext).replace(/[\\/:*?"<>|\s]+/g,"_");
     await fetch(TELEGRAM_RELAY_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
       body: JSON.stringify({imageB64:b64, filename:fname, caption:cap})});
@@ -329,13 +329,16 @@ async function sendBoardPhotoToTelegram(file, meta){
 async function apiPhotoUpload(file, meta){
   if(!GAS_URL) return {ok:false, err:"GAS 미설정"};
   try{
+    // 원본 그대로 저장 (썸네일만 생성)
     const [data, thumb] = await Promise.all([fileToB64(file), makeThumbB64(file)]);
-    const ext = (file.name.match(/\.[A-Za-z0-9]+$/)||[".jpg"])[0];
+    const mime=file.type||"image/jpeg", ext=(file.name.match(/\.[A-Za-z0-9]+$/)||[".jpg"])[0];
     const safe = String(meta.line||"라인").replace(/[\\/:*?"<>|\s]+/g,"_");
     const name = `${meta.date}_${meta.shift}_${safe}_${Date.now()}${ext}`;
     const r = await fetch(GAS_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body: JSON.stringify({action:"photo", name, mime:file.type||"image/jpeg", data, thumb, meta})});
-    return await r.json();
+      body: JSON.stringify({action:"photo", name, mime, data, thumb, meta})});
+    const j = await r.json();
+    if(j && typeof j==="object"){ j._thumb=thumb; j._name=name; }
+    return j;
   }catch(e){ return {ok:false, err:String(e)}; }
 }
 async function apiPhotoList(){
@@ -883,7 +886,17 @@ function App(){
   }, []);
   const uploadBoardPhoto = useCallback(async(file, meta)=>{
     const r = await apiPhotoUpload(file, meta);
-    if(r && r.ok){ sendBoardPhotoToTelegram(file, meta); await loadPhotos(); return true; }
+    if(r && r.ok){
+      // 목록 새로고침을 기다리지 않고 바로 표시 → 백그라운드에서 서버 목록으로 교체
+      const tmpThumb = "local_"+Date.now();
+      thumbCache.current.set(tmpThumb, `data:image/jpeg;base64,${r._thumb}`);
+      const f0 = r.file || r.data || {};
+      const item = {id: r.id||f0.id||tmpThumb, thumbId: r.thumbId||f0.thumbId||tmpThumb, name:r._name, line:meta.line, date:meta.date, shift:meta.shift, _local:true};
+      if(item.thumbId!==tmpThumb) thumbCache.current.set(item.thumbId, `data:image/jpeg;base64,${r._thumb}`);
+      setPhotos(p=>({...p, list:[item, ...(p.list||[])]}));
+      loadPhotos();
+      return true;
+    }
     alert("사진 업로드 실패: "+((r&&r.err)||"연결 오류")); return false;
   }, [loadPhotos]);
   const downloadPhoto = useCallback(async(p)=>{
