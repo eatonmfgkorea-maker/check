@@ -170,7 +170,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V095";
+const APP_VERSION = "V096";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -939,8 +939,13 @@ function App(){
     setEditing(rec);
   }, [settings, liveRecs]);
 
+  // FTIV 현황판 QR 을 핸드폰 기본 카메라로 찍어 들어온 경우: #ftivqr=FTIVQR1.… → 현황판 탭 + 표 미리보기
+  const [ftivQr, setFtivQr] = useState(()=>{ const h=location.hash||"", i=h.indexOf("ftivqr="); return i>=0 ? h.slice(i+7) : ""; });
+  useEffect(()=>{ if(ftivQr) setTab("board"); }, []);
+  const clearFtivQr = ()=>{ if(!ftivQr) return; setFtivQr(""); try{ history.replaceState(null,"",location.pathname+location.search); }catch(e){} };
+
   // 메일 링크(#inbox)로 들어오면 결재함 탭 자동 열기
-  useEffect(()=>{ if((location.hash||"").toLowerCase().indexOf("inbox")>=0) setTab("inbox"); }, []);
+  useEffect(()=>{ if(!ftivQr && (location.hash||"").toLowerCase().indexOf("inbox")>=0) setTab("inbox"); }, []);
 
   // QR 라인 모드: #line=Auto%20GVV (라인명) 또는 #line=AGV (라인코드) → 생산계획 탭, 해당 라인만
   const [lineFocus, setLineFocus] = useState(()=>{
@@ -1209,7 +1214,7 @@ function App(){
           onPickDate={(d)=>{ setJumpDate(d); setTab("plan"); }} />}
         {tab==="board" && <BoardView photos={photos} onReload={loadPhotos} getThumb={getThumb}
           onDownload={downloadPhoto} onDelete={deleteBoardPhoto}
-          masterLines={settings.lines||[]} onUpload={uploadBoardPhoto} />}
+          masterLines={settings.lines||[]} onUpload={uploadBoardPhoto} initialQr={ftivQr} onQrDone={clearFtivQr} />}
         {tab==="es" && <EsView records={liveRecs} settings={settings}
           onNew={(tpl)=>setEditing(newEsRecord(tpl, settings))} onOpen={setViewing} onEdit={setEditing} onDelete={removeRec} />}
         {tab==="new" && <NewView settings={settings} onPick={(type)=>{
@@ -1608,8 +1613,9 @@ const H2I_URL  = "https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-t
 const H2C_URL  = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";     // 위가 실패하면 대신
 const PAKO_URL = "https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako_inflate.min.js";
 async function decodeFtivQr(text){
-  if(!text || !text.startsWith("FTIVQR1.")) throw new Error("FTIV 현황판 QR 이 아닙니다.");
-  const b64 = text.slice(8).replace(/-/g,"+").replace(/_/g,"/");
+  const at = (text||"").indexOf("FTIVQR1.");   // QR 이 check 주소(…#ftivqr=FTIVQR1.…)여도 뒤쪽만 씀
+  if(at < 0) throw new Error("FTIV 현황판 QR 이 아닙니다.");
+  const b64 = text.slice(at+8).replace(/[^A-Za-z0-9\-_]+$/,"").replace(/-/g,"+").replace(/_/g,"/");
   const bin = atob(b64 + "===".slice((b64.length+3)%4));
   const u8 = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i);
   let json;
@@ -1681,43 +1687,60 @@ function FtivQrBoard({o}){
   );
 }
 
-function QrBoardImport({onClose, onSave, masterLines}){
+function QrBoardImport({onClose, onSave, masterLines, initialText}){
   const videoRef = useRef(null), canvasRef = useRef(null), fileRef = useRef(null), boardRef = useRef(null);
   const [data, setData] = useState(null);
   const [msg, setMsg] = useState("카메라를 켜는 중…");
   const [busy, setBusy] = useState(false);
-  // 카메라로 계속 찍으면서 QR 찾기 (찾으면 바로 멈춤)
+  // 핸드폰 기본 카메라로 찍어 링크로 들어온 경우: 카메라 없이 바로 미리보기
+  const [fromLink, setFromLink] = useState(!!initialText);
   useEffect(()=>{
-    if(data) return;
-    let stream=null, stop=false, raf=0;
+    if(!initialText) return;
+    decodeFtivQr(initialText).then(setData).catch(e=>{ setFromLink(false); setMsg(e.message+" — 다시 찍어 주세요."); });
+  }, []);
+  // 카메라로 계속 찍으면서 QR 찾기 (찾으면 바로 멈춤).
+  // 안드로이드는 휴대폰 내장 QR 인식(BarcodeDetector) 먼저, 없으면 jsQR 로 가운데 네모 부분만 원래 해상도로 분석
+  useEffect(()=>{
+    if(data || fromLink) return;
+    let stream=null, stop=false, timer=0;
+    const found = async(text)=>{
+      if(!text || text.indexOf("FTIVQR1.")<0){ setMsg("FTIV 현황판 QR 이 아닙니다."); return false; }
+      try{ const o = await decodeFtivQr(text); stop=true; stream && stream.getTracks().forEach(t=>t.stop()); setData(o); return true; }
+      catch(e){ setMsg(e.message); return false; }
+    };
     (async()=>{
       try{
-        await loadScriptOnce(JSQR_URL);
-        stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}, audio:false});
+        let detector = null;
+        try{ if("BarcodeDetector" in window && (await window.BarcodeDetector.getSupportedFormats()).includes("qr_code")) detector = new window.BarcodeDetector({formats:["qr_code"]}); }catch(e){}
+        if(!detector) await loadScriptOnce(JSQR_URL);
+        stream = await navigator.mediaDevices.getUserMedia({audio:false,
+          video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}});
         if(stop){ stream.getTracks().forEach(t=>t.stop()); return; }
+        try{ await stream.getVideoTracks()[0].applyConstraints({advanced:[{focusMode:"continuous"}]}); }catch(e){}
         const v = videoRef.current; v.srcObject = stream; v.setAttribute("playsinline",""); await v.play();
-        setMsg("현황판 화면의 QR 을 네모 안에 맞추세요.");
+        setMsg("현황판 화면의 QR 을 네모 안에 크게 맞추세요.");
         const c = canvasRef.current, ctx = c.getContext("2d", {willReadFrequently:true});
         const tick = async()=>{
           if(stop) return;
           if(v.videoWidth){
-            const w = Math.min(960, v.videoWidth), h = Math.round(v.videoHeight*w/v.videoWidth);
-            c.width=w; c.height=h; ctx.drawImage(v,0,0,w,h);
-            const q = window.jsQR(ctx.getImageData(0,0,w,h).data, w, h, {inversionAttempts:"dontInvert"});
-            if(q && q.data){
-              if(q.data.startsWith("FTIVQR1.")){
-                try{ const o = await decodeFtivQr(q.data); stop=true; stream.getTracks().forEach(t=>t.stop()); setData(o); return; }
-                catch(e){ setMsg(e.message); }
-              } else setMsg("FTIV 현황판 QR 이 아닙니다.");
+            if(detector){
+              try{ const r = await detector.detect(v); if(r && r.length && await found(r[0].rawValue)) return; }catch(e){}
+            } else {
+              // 가운데 정사각형(화면 네모 표시 부분)을 원래 해상도로 잘라 분석 — 작은 칸도 뭉개지지 않게
+              const side = Math.round(Math.min(v.videoWidth, v.videoHeight)*0.9), sx = (v.videoWidth-side)/2, sy = (v.videoHeight-side)/2;
+              const n = Math.min(side, 1100);
+              c.width=n; c.height=n; ctx.drawImage(v, sx, sy, side, side, 0, 0, n, n);
+              const q = window.jsQR(ctx.getImageData(0,0,n,n).data, n, n, {inversionAttempts:"attemptBoth"});
+              if(q && q.data && await found(q.data)) return;
             }
           }
-          raf = requestAnimationFrame(tick);
+          timer = setTimeout(tick, 120);
         };
         tick();
-      }catch(e){ setMsg("카메라를 쓸 수 없습니다. 아래 [사진에서 QR 읽기]를 눌러 주세요."); }
+      }catch(e){ setMsg("카메라를 쓸 수 없습니다. 핸드폰 기본 카메라로 QR 을 찍거나, 아래 [사진에서 QR 읽기]를 눌러 주세요."); }
     })();
-    return ()=>{ stop=true; cancelAnimationFrame(raf); if(stream) stream.getTracks().forEach(t=>t.stop()); };
-  }, [data]);
+    return ()=>{ stop=true; clearTimeout(timer); if(stream) stream.getTracks().forEach(t=>t.stop()); };
+  }, [data, fromLink]);
   // 찍어 둔 사진·캡처에서 QR 읽기
   const fromFile = async(e)=>{
     const f = e.target.files && e.target.files[0]; e.target.value="";
@@ -1779,7 +1802,7 @@ function QrBoardImport({onClose, onSave, masterLines}){
           <div className="overflow-auto border border-slate-200 rounded-xl flex-1 min-h-0"><div ref={boardRef} style={{width:1100}}><FtivQrBoard o={data}/></div></div>
           <p className="text-[11.5px] text-slate-400 mt-2">옆으로 밀어서 전체를 볼 수 있어요. 저장하면 이 표가 사진으로 [현황판] 탭에 올라갑니다.</p>
           <div className="mt-2 flex gap-2">
-            <button disabled={busy} onClick={()=>{ setData(null); setMsg("카메라를 켜는 중…"); }} className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-500 font-bold disabled:opacity-50">다시 찍기</button>
+            <button disabled={busy} onClick={()=>{ setFromLink(false); setData(null); setMsg("카메라를 켜는 중…"); }} className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-500 font-bold disabled:opacity-50">다시 찍기</button>
             <button disabled={busy} onClick={save} className="flex-[2] py-2.5 rounded-xl bg-slate-900 text-white font-bold disabled:opacity-50">{busy ? "저장 중…" : "📷 현황판에 저장"}</button>
           </div>
         </>)}
@@ -1788,14 +1811,14 @@ function QrBoardImport({onClose, onSave, masterLines}){
   );
 }
 
-function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLines, onUpload}){
+function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLines, onUpload, initialQr, onQrDone}){
   const [fd, setFd] = useState(todayStr());   // 기본: 오늘만 ("" = 전체)
   const [fl, setFl] = useState("");        // 라인 필터
   const [fs, setFs] = useState("");        // 주야 필터
   const [viewer, setViewer] = useState(null);
   // 직접 추가 (생산계획에 없는 라인도 가능)
   const [addOpen, setAddOpen] = useState(false);
-  const [qrOpen, setQrOpen] = useState(false);   // QR+ : FTIV 실시간 현황판 QR 찍기
+  const [qrOpen, setQrOpen] = useState(!!initialQr);   // QR+ : FTIV 실시간 현황판 QR 찍기 (기본 카메라 링크로 들어오면 바로 열림)
   const [aDate, setADate] = useState(todayStr());
   const [aLine, setALine] = useState("");
   const [aLineCustom, setALineCustom] = useState("");
@@ -1897,7 +1920,7 @@ function BoardView({photos, onReload, getThumb, onDownload, onDelete, masterLine
         </div>
       )}
 
-      {qrOpen && <QrBoardImport masterLines={masterLines} onClose={()=>setQrOpen(false)}
+      {qrOpen && <QrBoardImport masterLines={masterLines} initialText={initialQr} onClose={()=>{ setQrOpen(false); onQrDone && onQrDone(); }}
         onSave={async(file, meta)=>{ const ok = await onUpload(file, meta); if(ok) setFd(meta.date); return ok; }}/>}
 
       {viewer && <PhotoViewer p={viewer} getThumb={getThumb} onDownload={onDownload}
