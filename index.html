@@ -170,7 +170,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V096";
+const APP_VERSION = "V097";
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -326,7 +326,7 @@ async function sendBoardPhotoToTelegram(file, meta, b64pre){
       body: JSON.stringify({imageB64:b64, filename:fname, caption:cap})});
   }catch(e){ /* 텔레그램 전송 실패는 무시 — 사진 업로드 자체엔 영향 없음 */ }
 }
-async function apiPhotoUpload(file, meta){
+async function gasPhotoUpload(file, meta){
   if(!GAS_URL) return {ok:false, err:"GAS 미설정"};
   try{
     // 원본 그대로 저장 (썸네일만 생성)
@@ -341,14 +341,14 @@ async function apiPhotoUpload(file, meta){
     return j;
   }catch(e){ return {ok:false, err:String(e)}; }
 }
-async function apiPhotoList(){
+async function gasPhotoList(){
   if(!GAS_URL) return {ok:false};
   try{ return await (await fetch(GAS_URL+"?action=photolist")).json(); }catch(e){ return {ok:false, err:String(e)}; }
 }
 async function apiPhotoGet(id){
   try{ return await (await fetch(GAS_URL+"?action=photoget&id="+encodeURIComponent(id))).json(); }catch(e){ return {ok:false}; }
 }
-async function apiPhotoDel(id, thumbId){
+async function gasPhotoDel(id, thumbId){
   try{ return await (await fetch(GAS_URL, {method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
     body: JSON.stringify({action:"photodel", id, thumbId})})).json(); }catch(e){ return {ok:false}; }
 }
@@ -632,22 +632,272 @@ function idbOpen(){
 async function idbSet(key,val){ try{ const db=await idbOpen(); await new Promise((res,rej)=>{ const tx=db.transaction(IDB_STORE,"readwrite"); tx.objectStore(IDB_STORE).put(val,key); tx.oncomplete=res; tx.onerror=()=>rej(tx.error);}); }catch(e){} }
 async function idbGet(key){ try{ const db=await idbOpen(); return await new Promise((res)=>{ const tx=db.transaction(IDB_STORE,"readonly"); const r=tx.objectStore(IDB_STORE).get(key); r.onsuccess=()=>res(r.result); r.onerror=()=>res(undefined);}); }catch(e){ return undefined; } }
 
-async function driveSave(payload){
-  if(!GAS_URL) return {ok:false, off:true};
-  try{
-    const res = await fetch(GAS_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body: JSON.stringify({ action:"save", key:"data", data: payload }) });
-    const j = await res.json().catch(()=>({ok:true}));
-    return {ok:true, ...j};
-  }catch(e){ return {ok:false, err:String(e)}; }
-}
-async function driveLoad(){
+async function gasDriveLoad(){
   if(!GAS_URL) return {ok:false, off:true};
   try{
     const res = await fetch(GAS_URL + "?action=load&key=data&t=" + Date.now() + "_" + Math.random().toString(36).slice(2), {cache:"no-store"});
     const j = await res.json();
     return {ok:true, data: j.data ?? j};
   }catch(e){ return {ok:false, err:String(e)}; }
+}
+
+/* ============================================================
+   서버 저장소 — 기록은 건별 행, 바뀐 것만 주고받음
+   (원본 사진·메일·생산계획 원본은 기존 구글 그대로)
+   ============================================================ */
+const SB_URL = "https://tmbeaswlpvsyjehacgsa.supabase.co";
+const SB_KEY = "sb_publishable_OM6ITpYn8LYPWXXhwdA4kQ_HuAyAxV9";   // 공개용 키 (코드에 넣어도 되는 키)
+const SB_THUMB_BUCKET = "chk-thumbs";
+const SB_CACHE_KEY = "sb_rec_cache_v1";      // IndexedDB: 서버 기록 사본 + 마지막 받은 시각
+const SB_PHOTO_CACHE_KEY = "sb_photo_cache_v1";
+const PHOTO_GAS_AUTOSYNC = Date.now() < Date.parse("2026-11-08T00:00:00+09:00");   // 전환 후 1주일만: 이전 앱으로 올라온 사진 목록 자동 반영
+const SB_OVERLAP_MS = 30*1000;               // 받은 시각 경계 겹침 (동시 저장 누락 방지)
+
+function sbHeaders(extra){ return Object.assign({ apikey: SB_KEY, "Content-Type":"application/json" }, extra||{}); }
+function sbIso(ms){ return new Date(Math.max(0, ms)).toISOString(); }
+function sbMs(s){ const t = Date.parse(s||""); return isNaN(t)?0:t; }
+async function sbCheck(res){
+  if(res.ok) return res;
+  let t=""; try{ t = await res.text(); }catch(e){}
+  throw new Error("서버 오류 " + res.status + (t?(" · "+t.slice(0,160)):""));
+}
+// 1000행씩 나눠 받기
+async function sbGetAll(table, select, filter, order){
+  const out = [];
+  for(let from=0; ; from+=1000){
+    const url = `${SB_URL}/rest/v1/${table}?select=${select}${filter?("&"+filter):""}&order=${order}`;
+    const res = await sbCheck(await fetch(url, { headers: sbHeaders({ "Range-Unit":"items", Range:`${from}-${from+999}` }), cache:"no-store" }));
+    const arr = await res.json();
+    out.push(...arr);
+    if(arr.length < 1000) break;
+  }
+  return out;
+}
+// 있으면 고치고 없으면 추가 (200건씩)
+async function sbUpsert(table, rows, key){
+  for(let i=0; i<rows.length; i+=200){
+    const res = await fetch(`${SB_URL}/rest/v1/${table}?on_conflict=${key}`, {
+      method:"POST", headers: sbHeaders({ Prefer:"resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify(rows.slice(i, i+200)) });
+    await sbCheck(res);
+  }
+}
+async function sbPatch(table, filter, obj){
+  await sbCheck(await fetch(`${SB_URL}/rest/v1/${table}?${filter}`, {
+    method:"PATCH", headers: sbHeaders({ Prefer:"return=minimal" }), body: JSON.stringify(obj) }));
+}
+// 키 순서와 무관하게 내용 비교 (서버(jsonb)는 키 순서를 바꿔 저장함)
+function stableStr(v){
+  if(v===null || typeof v!=="object") return JSON.stringify(v===undefined?null:v);
+  if(Array.isArray(v)) return "[" + v.map(x=> x===undefined?"null":stableStr(x)).join(",") + "]";
+  const ks = Object.keys(v).filter(k=> v[k]!==undefined).sort();
+  return "{" + ks.map(k=> JSON.stringify(k)+":"+stableStr(v[k])).join(",") + "}";
+}
+
+/* ---- 기록·설정·계획: 서버 사본 캐시 ---- */
+const SBC = { wm:0, stateWm:0, rec:{}, settings:null, plan:null };
+const SBC_STR = {};              // id → stableStr (메모리만)
+let sbcReady = null, sbcTimer = null;
+function sbcInit(){
+  if(!sbcReady) sbcReady = (async()=>{
+    const c = await idbGet(SB_CACHE_KEY);
+    if(c && c.v===1){ SBC.wm=c.wm||0; SBC.stateWm=c.stateWm||0; SBC.rec=c.rec||{}; SBC.settings=c.settings||null; SBC.plan=c.plan||null; }
+  })();
+  return sbcReady;
+}
+function sbcPersist(){
+  clearTimeout(sbcTimer);
+  sbcTimer = setTimeout(()=>{ idbSet(SB_CACHE_KEY, { v:1, wm:SBC.wm, stateWm:SBC.stateWm, rec:SBC.rec, settings:SBC.settings, plan:SBC.plan }); }, 400);
+}
+function sbcStr(id){
+  if(SBC_STR[id]===undefined && SBC.rec[id]!==undefined) SBC_STR[id] = stableStr(SBC.rec[id]);
+  return SBC_STR[id];
+}
+
+// 불러오기: 마지막으로 받은 이후 바뀐 것만 서버에서 받고, 전체 목록을 돌려줌 (기존 driveLoad와 같은 모양)
+async function driveLoad(){
+  try{
+    await sbcInit();
+    const rows = await sbGetAll("chk_records", "id,data,updated_at",
+      SBC.wm ? ("updated_at=gte."+encodeURIComponent(sbIso(SBC.wm - SB_OVERLAP_MS))) : "", "updated_at.asc,id.asc");
+    rows.forEach(r=>{ SBC.rec[r.id] = r.data; delete SBC_STR[r.id]; const t=sbMs(r.updated_at); if(t>SBC.wm) SBC.wm=t; });
+    const st = await sbGetAll("chk_state", "key,data,updated_at",
+      SBC.stateWm ? ("updated_at=gte."+encodeURIComponent(sbIso(SBC.stateWm - SB_OVERLAP_MS))) : "", "updated_at.asc");
+    st.forEach(s=>{ if(s.key==="settings") SBC.settings=s.data; else if(s.key==="plan") SBC.plan=s.data; const t=sbMs(s.updated_at); if(t>SBC.stateWm) SBC.stateWm=t; });
+    if(rows.length || st.length) sbcPersist();
+    const recs = Object.values(SBC.rec);
+    if(!recs.length && !SBC.settings && !SBC.plan) return {ok:true, data:{}};   // 서버가 비어 있음 → 이 기기 데이터로 복구 저장
+    const data = { records: recs };
+    if(SBC.settings) data.settings = SBC.settings;
+    if(SBC.plan) data.planData = SBC.plan;
+    return {ok:true, data};
+  }catch(e){ return {ok:false, err:String(e)}; }
+}
+
+// 저장: 서버 사본과 내용이 다른 문서만 올림 (기존 driveSave와 같은 모양)
+async function driveSave(payload){
+  try{
+    await sbcInit();
+    payload = payload||{};
+    const changed = [];
+    (Array.isArray(payload.records)?payload.records:[]).forEach(r=>{
+      if(!r || !r.id) return;
+      const s = stableStr(r);
+      if(s !== sbcStr(r.id)) changed.push({ r, s });
+    });
+    if(changed.length){
+      await sbUpsert("chk_records", changed.map(x=>({ id:String(x.r.id), type:x.r.type||null, data:x.r })), "id");
+      changed.forEach(x=>{ SBC.rec[x.r.id]=x.r; SBC_STR[x.r.id]=x.s; });
+    }
+    if(payload.settings && typeof payload.settings==="object" && stableStr(payload.settings)!==stableStr(SBC.settings)){
+      await sbUpsert("chk_state", [{ key:"settings", data:payload.settings }], "key");
+      SBC.settings = payload.settings;
+    }
+    const p = payload.planData;
+    if(p && Array.isArray(p.rows) && p.rows.length && stableStr(p)!==stableStr(SBC.plan)){
+      await sbUpsert("chk_state", [{ key:"plan", data:p }], "key");
+      SBC.plan = p;
+    }
+    sbcPersist();
+    return {ok:true, saved:changed.length};
+  }catch(e){ return {ok:false, err:String(e)}; }
+}
+
+/* ---- 기존 앱(구글) 데이터 가져오기 — 더 최신인 것만, 구글 원본은 그대로 ---- */
+async function migrateFromGoogle(onStep){
+  onStep && onStep("기존 앱 데이터 받는 중… (수십 초 걸릴 수 있어요)");
+  const g = await gasDriveLoad();
+  if(!g.ok || !g.data) throw new Error("기존 데이터를 받지 못했습니다: " + (g.err||""));
+  const d = g.data;
+  onStep && onStep("서버 최신본 확인 중…");
+  const cur = await driveLoad();
+  if(!cur.ok) throw new Error(cur.err||"서버 읽기 실패");
+  const ts = r=> sbMs((r&&(r.updatedAt||r.createdAt))||"");
+  const put = (Array.isArray(d.records)?d.records:[]).filter(r=> r && r.id && ts(r) > (SBC.rec[r.id]? ts(SBC.rec[r.id]) : -1));
+  onStep && onStep(`기록 ${put.length}건 올리는 중…`);
+  if(put.length){
+    await sbUpsert("chk_records", put.map(r=>({ id:String(r.id), type:r.type||null, data:r })), "id");
+    put.forEach(r=>{ SBC.rec[r.id]=r; delete SBC_STR[r.id]; });
+  }
+  let sets=false, plan=false;
+  if(d.settings && (!SBC.settings || String(d.settings.settingsAt||"") > String(SBC.settings.settingsAt||""))){
+    await sbUpsert("chk_state", [{ key:"settings", data:d.settings }], "key"); SBC.settings=d.settings; sets=true;
+  }
+  if(d.planData && Array.isArray(d.planData.rows) && d.planData.rows.length &&
+     (!SBC.plan || String(d.planData.uploadedAt||"") > String(SBC.plan.uploadedAt||""))){
+    await sbUpsert("chk_state", [{ key:"plan", data:d.planData }], "key"); SBC.plan=d.planData; plan=true;
+  }
+  sbcPersist();
+  return { total:(d.records||[]).length, put:put.length, settings:sets, plan };
+}
+
+/* ---- 현황판 사진: 목록·썸네일은 서버, 원본은 구글 드라이브 ---- */
+const SBP = { wm:0, rows:{} };
+let sbpReady = null, sbpTimer = null;
+function sbpInit(){
+  if(!sbpReady) sbpReady = (async()=>{ const c = await idbGet(SB_PHOTO_CACHE_KEY); if(c && c.v===1){ SBP.wm=c.wm||0; SBP.rows=c.rows||{}; } })();
+  return sbpReady;
+}
+function sbpPersist(){ clearTimeout(sbpTimer); sbpTimer = setTimeout(()=>{ idbSet(SB_PHOTO_CACHE_KEY, { v:1, wm:SBP.wm, rows:SBP.rows }); }, 400); }
+function sbThumbUrl(path){ return `${SB_URL}/storage/v1/object/public/${SB_THUMB_BUCKET}/` + String(path).split("/").map(encodeURIComponent).join("/"); }
+function sbPhotoToFile(r){
+  return { id: r.drive_id || ("nm:"+r.name), name:r.name, line:r.line||"", date:r.date||"", shift:r.shift||"", by:r.by_name||"",
+    size:r.size||0, createdAt:r.created_at||"", thumbId: r.thumb_path ? ("sb:"+r.thumb_path) : "" };
+}
+// 작은 썸네일 (긴 변 480px, 약 30KB)
+async function smallThumbBlob(src){
+  let bmp=null, iw=0, ih=0;
+  try{ bmp = await createImageBitmap(src, {imageOrientation:"from-image"}); iw=bmp.width; ih=bmp.height; }catch(e){}
+  if(!bmp){
+    bmp = await new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=URL.createObjectURL(src); });
+    iw=bmp.naturalWidth; ih=bmp.naturalHeight;
+  }
+  const sc = Math.min(1, 480/Math.max(iw, ih||1));
+  const c = document.createElement("canvas"); c.width=Math.max(1,Math.round(iw*sc)); c.height=Math.max(1,Math.round(ih*sc));
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return await new Promise(res=> c.toBlob(res, "image/jpeg", 0.72));
+}
+function b64ToBlob(b64, mime){ const bin=atob(b64); const a=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i); return new Blob([a], {type:mime||"image/jpeg"}); }
+async function sbUploadThumb(path, blob){
+  await sbCheck(await fetch(`${SB_URL}/storage/v1/object/${SB_THUMB_BUCKET}/` + String(path).split("/").map(encodeURIComponent).join("/"), {
+    method:"POST", headers:{ apikey:SB_KEY, "Content-Type":"image/jpeg", "x-upsert":"true", "cache-control":"31536000" }, body: blob }));
+}
+function thumbPathFor(date, key){ return `${String(date||"nodate").replace(/[^0-9-]/g,"")||"nodate"}/${String(key||uid()).replace(/[^A-Za-z0-9_-]/g,"_")}.jpg`; }
+
+async function apiPhotoList(){
+  try{
+    await sbpInit();
+    const rows = await sbGetAll("chk_photos", "*",
+      SBP.wm ? ("updated_at=gte."+encodeURIComponent(sbIso(SBP.wm - SB_OVERLAP_MS))) : "", "updated_at.asc,name.asc");
+    rows.forEach(r=>{ SBP.rows[r.name]=r; const t=sbMs(r.updated_at); if(t>SBP.wm) SBP.wm=t; });
+    if(rows.length) sbpPersist();
+    const files = Object.values(SBP.rows).filter(r=>!r.deleted).map(sbPhotoToFile)
+      .sort((a,b)=> String(b.createdAt||"").localeCompare(String(a.createdAt||"")));
+    return {ok:true, files};
+  }catch(e){ return {ok:false, err:String(e)}; }
+}
+async function apiPhotoUpload(file, meta){
+  const j = await gasPhotoUpload(file, meta);          // 원본 → 구글 드라이브 (기존 그대로)
+  if(!(j && j.ok)) return j;
+  try{
+    const f0 = j.file || j.data || {};
+    const driveId = j.id || f0.id || "";
+    const gasThumb = j.thumbId || f0.thumbId || "";
+    const path = thumbPathFor(meta.date, driveId || uid());
+    await sbUploadThumb(path, await smallThumbBlob(file));
+    await sbUpsert("chk_photos", [{ name:j._name, drive_id:driveId||null, gas_thumb_id:gasThumb||null, thumb_path:path,
+      line:meta.line||"", date:meta.date||"", shift:meta.shift||"", by_name:meta.by||"", size:file.size||null,
+      created_at:new Date().toISOString(), deleted:false }], "name");
+    j.thumbId = "sb:"+path;
+  }catch(e){ console.warn("사진 목록 저장 실패 — 다음 자동 동기화 때 채워짐", e); }
+  return j;
+}
+async function apiPhotoDel(id, thumbId){
+  await sbpInit();
+  const row = Object.values(SBP.rows).find(r=> r.drive_id===id || ("nm:"+r.name)===id);
+  let r = {ok:true};
+  if(id && String(id).indexOf("nm:")!==0) r = await gasPhotoDel(id, (row&&row.gas_thumb_id)||"");
+  if(!(r && r.ok)) return r;
+  try{
+    if(row){ await sbPatch("chk_photos", "name=eq."+encodeURIComponent(row.name), { deleted:true }); row.deleted=true; sbpPersist(); }
+    return {ok:true};
+  }catch(e){ return {ok:false, err:String(e)}; }
+}
+// 기존 앱(구글)에만 있는 사진을 목록·썸네일에 채움. 반환: 새로 채운 수
+let photoSyncBusy = false;
+async function syncPhotosFromGoogle(opts){
+  opts = opts||{};
+  if(photoSyncBusy) return 0;
+  photoSyncBusy = true;
+  try{
+    await sbpInit();
+    await apiPhotoList();
+    const g = await gasPhotoList();
+    if(!(g && g.ok && Array.isArray(g.files))) return 0;
+    const known = new Set(Object.keys(SBP.rows));
+    const missing = g.files.filter(f=> f && f.name && !known.has(f.name));
+    const todo = opts.limit ? missing.slice(0, opts.limit) : missing;
+    let done = 0;
+    for(const f of todo){
+      let path = null;
+      try{
+        const t = (f.thumbId || f.id) ? await apiPhotoGet(f.thumbId || f.id) : null;
+        if(t && t.ok && t.data){
+          path = thumbPathFor(f.date, f.id || f.name);
+          await sbUploadThumb(path, await smallThumbBlob(b64ToBlob(t.data, t.mime)));
+        }
+      }catch(e){ path = null; }
+      try{
+        await sbUpsert("chk_photos", [{ name:f.name, drive_id:f.id||null, gas_thumb_id:f.thumbId||null, thumb_path:path,
+          line:f.line||"", date:f.date||"", shift:f.shift||"", by_name:f.by||"", size:f.size||null,
+          created_at:f.createdAt||null, deleted:false }], "name");
+        done++;
+        opts.onProgress && opts.onProgress(done, todo.length, missing.length);
+      }catch(e){}
+    }
+    if(done) await apiPhotoList();
+    return done;
+  }finally{ photoSyncBusy = false; }
 }
 
 function loadLocal(key, fallback){ try{ const v=localStorage.getItem(key); return v? JSON.parse(v): fallback; }catch(e){ return fallback; } }
@@ -783,7 +1033,7 @@ function App(){
       try{
         const res = await fetch(location.pathname + "?v=" + Date.now(), {cache:"no-store"});
         const txt = await res.text();
-        const m = txt.match(/APP_VERSION\s*=\s*"(V\d+)"/);
+        const m = txt.match(/APP_VERSION\s*=\s*"(V\d+S?)"/);
         if(!m || stop) return;
         const latest = m[1];
         if(latest !== APP_VERSION){
@@ -878,6 +1128,7 @@ function App(){
   }, []);
   const getThumb = useCallback(async(id)=>{
     if(!id) return "";
+    if(String(id).indexOf("sb:")===0) return thumbCache.current.get(id) || sbThumbUrl(String(id).slice(3));
     if(thumbCache.current.has(id)) return thumbCache.current.get(id);
     const r = await apiPhotoGet(id);
     if(r && r.ok){ const u = `data:${r.mime||"image/jpeg"};base64,${r.data}`; thumbCache.current.set(id,u); return u; }
@@ -915,6 +1166,18 @@ function App(){
     if(r && r.ok) await loadPhotos(); else alert("삭제 실패");
   }, [settings.adminPw, loadPhotos]);
   useEffect(()=>{ loadPhotos(); }, []);
+  useEffect(()=>{   // 기존 앱(구글)으로 올라온 현황판 사진도 목록에 자동 반영 (기기당 1시간에 한 번, 백그라운드)
+    if(!PHOTO_GAS_AUTOSYNC) return;
+    const KEY = "mfg_cl_photo_gas_sync";
+    const run = ()=>{
+      let last=0; try{ last=parseInt(localStorage.getItem(KEY)||"0",10)||0; }catch(e){}
+      if(Date.now()-last < 60*60*1000 || document.visibilityState!=="visible") return;
+      try{ localStorage.setItem(KEY, String(Date.now())); }catch(e){}
+      syncPhotosFromGoogle({limit:40}).then(n=>{ if(n>0) loadPhotos(); }).catch(()=>{});
+    };
+    const t = setTimeout(run, 10000), iv = setInterval(run, 10*60*1000);
+    return ()=>{ clearTimeout(t); clearInterval(iv); };
+  }, []);
 
   const createFromPlan = useCallback((type, p)=>{
     let rec = newRecord(type, settings);
@@ -965,7 +1228,11 @@ function App(){
         setSync({state:"loading", msg:"동기화 중…"});
         const r = await driveLoad();
         if(r.ok && r.data && Array.isArray(r.data.records)){
+          { const localNow = (recordsRef.current && recordsRef.current.length) ? recordsRef.current : (Array.isArray(idbR) ? idbR : []);
+            if(mergeRecords(localNow, r.data.records).changed) needPushRef.current = true; }   // 바로 판단 (setState 안은 나중에 실행됨)
           setRecords(local=>{ const mr = mergeRecords(local, r.data.records); if(mr.changed) needPushRef.current = true; return mr.merged; });
+          if(r.data.settings){ const sNow = settingsRef.current || (idbS ? mergeSettings(idbS) : null);
+            if(sNow){ recoverSettings._recovered = false; syncSettings(sNow, r.data.settings); if(recoverSettings._recovered || (sNow.settingsAt||"")>(r.data.settings.settingsAt||"")) needPushRef.current = true; } }
           if(r.data.settings) setSettingsRaw(local=>{ const ms=syncSettings(local, r.data.settings); if(recoverSettings._recovered || (local.settingsAt||"")>(r.data.settings.settingsAt||"")) needPushRef.current=true; return ms; });
           if(r.data.planData && Array.isArray(r.data.planData.rows)) setPlanData(r.data.planData);
           setSync({state:"ok", msg:"동기화됨"});
@@ -3014,7 +3281,7 @@ function AdminGate({adminPw, onUnlock, onCancel}){
 
 function SettingsView({settings, setSettings, planData}){
   const [sub, setSub] = useState("master");
-  const tabs = [["master","품목 (생산계획 기준)"],["tpl","점검표 양식"],["es","ES 양식"],["people","인원/결재"],["briefing","조회일지 기본값"]];
+  const tabs = [["master","품목 (생산계획 기준)"],["tpl","점검표 양식"],["es","ES 양식"],["people","인원/결재"],["briefing","조회일지 기본값"],["move","기존 데이터"]];
   return (
     <div>
       <div className="flex gap-1 mb-4 border-b border-slate-200">
@@ -3026,6 +3293,44 @@ function SettingsView({settings, setSettings, planData}){
       {sub==="es" && <EsSettings settings={settings} setSettings={setSettings}/>}
       {sub==="people" && <PeopleSettings settings={settings} setSettings={setSettings}/>}
       {sub==="briefing" && <BriefingSettings settings={settings} setSettings={setSettings}/>}
+      {sub==="move" && <DataMoveSettings/>}
+    </div>
+  );
+}
+
+function DataMoveSettings(){
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState("");
+  const runRecords = async()=>{
+    if(!confirm("기존 앱의 점검 기록·설정·생산계획을 가져옵니다.\n\n· 기존 앱 쪽이 더 최신인 문서만 가져오고, 이 앱에서 고친 건 그대로 둡니다.\n· 기존 앱 데이터는 지우지 않습니다.")) return;
+    setBusy("rec"); setMsg("");
+    try{
+      const r = await migrateFromGoogle(s=>setMsg(s));
+      setMsg(`완료 — 기존 앱 기록 ${r.total}건 중 ${r.put}건 가져옴${r.settings?" · 설정 갱신":""}${r.plan?" · 생산계획 갱신":""}. 화면을 새로 고칩니다…`);
+      setTimeout(()=>location.reload(), 1800);
+    }catch(e){ setMsg("실패: " + String((e&&e.message)||e)); }
+    setBusy("");
+  };
+  const runPhotos = async()=>{
+    if(!confirm("기존 앱에만 있는 현황판 사진을 이 앱 목록에 채웁니다.\n장당 2~3초 걸리니 끝날 때까지 화면을 닫지 마세요.\n(원본 사진은 구글 드라이브에 그대로 있습니다)")) return;
+    setBusy("ph"); setMsg("사진 목록 비교 중… (20초 정도)");
+    try{
+      const n = await syncPhotosFromGoogle({ onProgress:(d,t)=>setMsg(`사진 ${d} / ${t}장 채우는 중…`) });
+      setMsg(n ? `완료 — 사진 ${n}장 채움` : "새로 채울 사진이 없습니다.");
+    }catch(e){ setMsg("실패: " + String((e&&e.message)||e)); }
+    setBusy("");
+  };
+  return (
+    <div className="space-y-3">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="font-bold text-slate-700">이전 저장소(구글) 데이터 가져오기</div>
+        <p className="text-[12px] text-slate-400 mt-1 leading-relaxed">이전 저장 방식(구글)에 남아 있는 기록과 현황판 사진 목록을 가져옵니다. 여러 번 눌러도 중복되지 않고, 기존 앱 데이터는 지우지 않습니다.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button disabled={!!busy} onClick={runRecords} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-[13px] font-bold disabled:opacity-40">{busy==="rec"?"가져오는 중…":"점검 기록·설정 가져오기"}</button>
+          <button disabled={!!busy} onClick={runPhotos} className="px-4 py-2 rounded-xl border border-slate-300 bg-white text-slate-700 text-[13px] font-bold disabled:opacity-40">{busy==="ph"?"채우는 중…":"현황판 사진 목록 채우기"}</button>
+        </div>
+        {msg && <div className="mt-3 text-[12.5px] font-semibold text-slate-600 bg-slate-50 rounded-lg px-3 py-2">{msg}</div>}
+      </div>
     </div>
   );
 }
