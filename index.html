@@ -170,7 +170,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V097";
+const APP_VERSION = "V098";   // V098: 관리자 비밀번호 기본값을 원문 대신 해시로 (코드에 비밀번호 원문 없음)
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -429,7 +429,7 @@ function defaultSettings(){
     crossPairs: [["황숙향","김나영"]],   // 교차 검토 짝: 한 사람이 작성하면 다른 사람이 검토 (작성 시 본인 비밀번호 확인)
     passwords: {},   // { 이름: 해시 } — 결재 비밀번호
     emails: {},      // { 이름: 이메일 } — 결재 알림 메일
-    adminPw: hashPw("1550612a"),   // 설정(관리자) 진입 비밀번호
+    adminPw: "1f44b822fc7e94",   // 설정(관리자) 진입 비밀번호
     places: ["FE","TCP"],
     deliveryCats: [...DEFAULT_DELIVERY_CATS],
     notices: [...DEFAULT_NOTICES],
