@@ -170,7 +170,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V098";   // V098: 관리자 비밀번호 기본값을 원문 대신 해시로 (코드에 비밀번호 원문 없음)
+const APP_VERSION = "V099";   // V098: 관리자 비밀번호 기본값을 원문 대신 해시로 (코드에 비밀번호 원문 없음)
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -2379,12 +2379,13 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
       </div>
       {rows.length===0 ? <div className="text-center text-slate-300 py-6 text-[13px]">계획 없음</div> : (
         <div className="overflow-x-auto">
-          <table className="w-full text-[13px]" style={{minWidth:"560px"}}>
+          <table className="w-full text-[13px]" style={{minWidth:"630px"}}>
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-[11.5px]">
                 <th className="text-left px-1.5 py-1.5 font-bold w-[92px]">라인</th>
                 <th className="text-left px-1.5 py-1.5 font-bold">품명 / 품번</th>
-                <th className="text-right px-1 py-1.5 font-bold w-[46px]">수량</th>
+                <th className="text-right px-1 py-1.5 font-bold w-[58px]">계획수량</th>
+                <th className="text-right px-1 py-1.5 font-bold w-[58px]">생산수량</th>
                 <th className="text-center px-1 py-1.5 font-bold w-[76px]">Start Up</th>
                 <th className="text-center px-1 py-1.5 font-bold w-[76px]">Dock Audit</th>
                 <th className="text-center px-1 py-1.5 font-bold w-[76px]">초도<span className="font-normal text-slate-400">(선택)</span></th>
@@ -2400,6 +2401,13 @@ function PlanView({records, settings, planData, onUploadPlan, reportSync, onRelo
                     <div className="text-[10.5px] text-slate-400 leading-tight">{row.pno}</div>
                   </td>
                   <td className="px-1 py-1.5 text-right text-slate-600 text-[11.5px]">{row.qty?row.qty.toLocaleString():"-"}</td>
+                  <td className="px-1 py-1.5 text-right text-[11.5px]">{(()=>{
+                    // 생산수량 = Dock Audit 의 Batch Size (생산수량)
+                    const d = recOf("dock", row);
+                    const n = d ? parseInt(String(d.batchSize||"").replace(/[^0-9]/g,""),10) : NaN;
+                    if(!Number.isFinite(n)) return <span className="text-slate-300">-</span>;
+                    return <span className={`font-bold ${row.qty && n<row.qty ? "text-rose-600" : "text-slate-800"}`}>{n.toLocaleString()}</span>;
+                  })()}</td>
                   {CL_TYPES.map(([t,,req])=> <td key={t} className="px-1 py-1.5"><StatusBtn type={t} row={row} optional={!req}/></td>)}
                   <td className="px-1 py-1.5"><BoardBtn row={row}/></td>
                 </tr>
