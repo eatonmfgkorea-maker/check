@@ -170,7 +170,8 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============================================================
    설정 / 상수
    ============================================================ */
-const APP_VERSION = "V099";   // V098: 관리자 비밀번호 기본값을 원문 대신 해시로 (코드에 비밀번호 원문 없음)
+const APP_VERSION = "V100";   // V100: 생산계획을 새로 받아도 지난달 이전 계획은 유지 (달력·작성 매칭용)
+const _V099_ = "";   // V098: 관리자 비밀번호 기본값을 원문 대신 해시로 (코드에 비밀번호 원문 없음)
 const BRIEFING_TIME = "08:35 ~ 08:40";   // 조회시간 고정값 (변경 불가)
 
 // ▼ Apps Script 배포 후 /exec URL 을 여기에 넣으면 자동 백업/동기화가 켜집니다.
@@ -1063,15 +1064,27 @@ function App(){
   const [planData, setPlanData] = useState(()=> loadLocal(LS_PLAN, {rows:[], file:"", uploadedAt:"", source:""}));
   const [reportSync, setReportSync] = useState({state:"idle", msg:""});
   const planRef = useRef(planData);
+  const planHistRef = useRef([]);   // 강제 새로고침 때도 지난 계획 보관
   useEffect(()=>{ planRef.current = planData; }, [planData]);
 
   const applyPlanRows = useCallback((rows, file, uploadedAt, source, maps)=>{
     const icvAssign = (maps&&maps.icvAssign)||[];
     rows = splitIcvRows(rows, icvAssign);   // "New ICV / Old ICV" → 인원편성 배정대로 New/Old 분리
+    // 새 계획 파일엔 지난달부터만 있음 → 그보다 이전 날짜 계획은 기존 것 그대로 유지 (최근 13개월)
+    const newRows = rows;
+    { const dates = rows.map(r=>String(r.date||"")).filter(Boolean).sort();
+      const minD = dates[0] || "";
+      const curRows = (planRef.current && planRef.current.rows && planRef.current.rows.length) ? planRef.current.rows : (planHistRef.current||[]);
+      const d0 = new Date(); d0.setMonth(d0.getMonth()-13); const cut = d0.toISOString().slice(0,7);
+      if(minD){
+        const old = curRows.filter(r=>{ const d=String(r.date||""); return d && d<minD && d.slice(0,7)>=cut; });
+        if(old.length) rows = old.concat(rows);
+      }
+    }
     setPlanData({rows, file:file||"", uploadedAt:uploadedAt||nowStr(), source:source||"",
       revMap:(maps&&maps.revMap)||{}, lineCodes:(maps&&maps.lineCodes)||{}, icvAssign});
     // 품목 마스터(라인/품명/품번)도 같은 데이터에서 생성 → 계획·작성 드롭다운이 항상 일치
-    const m = masterFromPlanRows(rows);
+    const m = masterFromPlanRows(newRows);
     setSettingsRaw(prev=>({...prev, lines:m.lines, items:m.items, masterSource:"plan", masterLoadedAt:nowStr()}));
     return m;
   }, []);
@@ -1098,6 +1111,7 @@ function App(){
 
   // 캐시 통째로 비우고 보고에서 강제로 다시 받기 (끈질긴 옛 캐시 제거용)
   const hardRefreshReport = useCallback(async()=>{
+    planHistRef.current = (planRef.current && planRef.current.rows) || [];
     try{ localStorage.removeItem(LS_PLAN); }catch(e){}
     try{ await idbSet(LS_PLAN, null); }catch(e){}
     setPlanData({rows:[], file:"", uploadedAt:"", source:"", revMap:{}, lineCodes:{}, icvAssign:[]});
